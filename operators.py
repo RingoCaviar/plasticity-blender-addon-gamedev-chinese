@@ -13,6 +13,8 @@ import gpu
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
 
+from . import translations
+
 
 _CHECKER_PREVIEWS = None
 _CHECKER_ENUM_MAP = {}

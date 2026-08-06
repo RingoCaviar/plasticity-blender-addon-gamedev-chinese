@@ -107,6 +107,27 @@ class TranslationCoverageTests(unittest.TestCase):
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         self.assertEqual(duplicates, [], f"Duplicate translation keys: {duplicates}")
 
+    def test_operators_imports_translations_before_reporting(self):
+        """Operator report calls must have the translations module bound at runtime."""
+        source = Path(__file__).with_name("operators.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imports_translations = any(
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name == "translations" for alias in node.names)
+            for node in tree.body
+        )
+        uses_translation_reports = any(
+            isinstance(node, ast.Attribute)
+            and node.attr == "report"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "translations"
+            for node in ast.walk(tree)
+        )
+        self.assertFalse(
+            uses_translation_reports and not imports_translations,
+            "operators.py calls translations.report without importing translations",
+        )
+
     def test_report_template_translates_before_formatting(self):
         fake_bpy = types.SimpleNamespace(
             app=types.SimpleNamespace(translations=types.SimpleNamespace(
