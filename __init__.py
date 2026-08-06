@@ -15,7 +15,7 @@ import os
 import bpy.app.handlers
 
 from bpy.app.handlers import persistent
-from . import operators, ui
+from . import operators, translations, ui
 from .client import PlasticityClient
 from .handler import SceneHandler
 
@@ -692,6 +692,7 @@ def select_similar(self, context):
 
 def register():
     print("Registering Plasticity client")
+    translations.register()
     bpy.utils.register_class(ui.ConnectButton)
     bpy.utils.register_class(ui.DisconnectButton)
     bpy.utils.register_class(ui.ListButton)
@@ -1271,6 +1272,7 @@ def register():
 
 def unregister():
     print("Unregistering Plasticity client")
+    translations.unregister()
     global _CHECKER_INIT_SCHEDULED
     global _LIVE_EXPAND_SYNC_SCHEDULED, _LIVE_EXPAND_SYNC_RETRIES_LEFT
     if _CHECKER_INIT_SCHEDULED:

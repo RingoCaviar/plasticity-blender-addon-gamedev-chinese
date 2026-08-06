@@ -1,0 +1,11 @@
+# Keep repository text canonical and prevent platform-specific diff noise.
+* text=auto eol=lf
+
+# Python source and project documentation are always text.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitignore text eol=lf

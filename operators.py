@@ -242,12 +242,12 @@ class SelectByFaceIDOperator(bpy.types.Operator):
 
         groups = mesh["groups"]
         if not groups:
-            self.report({'ERROR'}, "No groups found")
+            translations.report(self, {'ERROR'}, "No groups found")
             return {'CANCELLED'}
 
         face_ids = mesh["face_ids"]
         if not face_ids:
-            self.report({'ERROR'}, "No face_ids found")
+            translations.report(self, {'ERROR'}, "No face_ids found")
             return {'CANCELLED'}
 
         selected_group_indices, _ = expand_plasticity_selection(
@@ -264,7 +264,7 @@ class SelectByFaceIDOperator(bpy.types.Operator):
         )
 
         if not selected_group_indices:
-            self.report({'ERROR'}, "No Plasticity faces selected")
+            translations.report(self, {'ERROR'}, "No Plasticity faces selected")
             return {'CANCELLED'}
 
         update_selection_mesh = True
@@ -362,12 +362,12 @@ class SelectByFaceIDEdgeOperator(bpy.types.Operator):
         groups = mesh["groups"]
 
         if not groups:
-            self.report({'ERROR'}, "No groups found")
+            translations.report(self, {'ERROR'}, "No groups found")
             return {'CANCELLED'}
 
         face_ids = mesh["face_ids"]
         if not face_ids:
-            self.report({'ERROR'}, "No face_ids found")
+            translations.report(self, {'ERROR'}, "No face_ids found")
             return {'CANCELLED'}
 
         selected_group_ids = get_selected_group_ids(groups, mesh, bm)
@@ -444,7 +444,7 @@ class MergeUVSeams(bpy.types.Operator):
         ]
 
         if not edit_objects:
-            self.report({'WARNING'}, "Select faces to merge UV seams")
+            translations.report(self, {'WARNING'}, "Select faces to merge UV seams")
             return {'CANCELLED'}
 
         occluded_only = bool(
@@ -539,7 +539,7 @@ class MergeUVSeams(bpy.types.Operator):
                 context.view_layer.objects.active = prev_active
 
             if not any_processed:
-                self.report({'WARNING'}, "Select faces to merge UV seams")
+                translations.report(self, {'WARNING'}, "Select faces to merge UV seams")
                 return {'CANCELLED'}
             return {'FINISHED'}
         finally:
@@ -1868,12 +1868,12 @@ class RelaxUVsPlasticityOperator(bpy.types.Operator):
     def execute(self, context):
         global _LIVE_UNWRAP_LAST_PROPS
         if bpy.app.version < (4, 3, 0):
-            self.report({'WARNING'}, 'Relax requires Blender 4.3 or newer')
+            translations.report(self, {'WARNING'}, 'Relax requires Blender 4.3 or newer')
             return {'CANCELLED'}
 
         edit_objects = self._edit_mesh_objects(context)
         if not edit_objects:
-            self.report({'WARNING'}, 'No editable mesh objects found')
+            translations.report(self, {'WARNING'}, 'No editable mesh objects found')
             return {'CANCELLED'}
 
         uv_sync = context.tool_settings.use_uv_select_sync
@@ -1963,7 +1963,7 @@ class RelaxUVsPlasticityOperator(bpy.types.Operator):
             })
 
         if not targets:
-            self.report({'WARNING'}, 'Need selected geometry')
+            translations.report(self, {'WARNING'}, 'Need selected geometry')
             return {'CANCELLED'}
 
         try:
@@ -2321,7 +2321,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
 
             if self.selection_method == 'FACE':
                 if context.mode != 'EDIT_MESH':
-                    self.report(
+                    translations.report(self,
                         {'INFO'},
                         "Face selection mode requires Edit Mode; using Object selection.",
                     )
@@ -2337,7 +2337,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
     def _execute_object_selection(self, context):
         objects = self._get_target_objects(context)
         if not objects:
-            self.report({'ERROR'}, "No mesh objects selected")
+            translations.report(self, {'ERROR'}, "No mesh objects selected")
             return {'CANCELLED'}
 
         prev_mode = context.mode
@@ -2400,7 +2400,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
         if prev_mode == 'EDIT_MESH' and prev_active and prev_active.type == 'MESH':
             bpy.ops.object.mode_set(mode='EDIT')
 
-        self.report({'INFO'}, f"Auto Unwrap: processed {processed}, skipped {skipped}")
+        translations.report(self, {'INFO'}, f"Auto Unwrap: processed {processed}, skipped {skipped}")
         return {'FINISHED'}
 
     def _get_target_objects(self, context):
@@ -2487,7 +2487,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
         groups = mesh.get("groups")
         face_ids = mesh.get("face_ids")
         if not groups or not face_ids:
-            self.report({'WARNING'}, f"{obj.name}: Missing Plasticity groups/face_ids")
+            translations.report(self, {'WARNING'}, f"{obj.name}: Missing Plasticity groups/face_ids")
             return False
 
         if not mesh.uv_layers:
@@ -2570,7 +2570,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
     def _execute_face_selection(self, context):
         edit_objects = self._get_edit_mode_objects(context)
         if not edit_objects:
-            self.report({'ERROR'}, "No mesh objects in Edit Mode")
+            translations.report(self, {'ERROR'}, "No mesh objects in Edit Mode")
             return {'CANCELLED'}
 
         processed = 0
@@ -2648,11 +2648,11 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
             self._update_status_text(context, None, force=True)
 
         if processed == 0:
-            self.report({'ERROR'}, "No Plasticity faces selected")
+            translations.report(self, {'ERROR'}, "No Plasticity faces selected")
             return {'CANCELLED'}
 
         self._unwrap_edit_selection(context)
-        self.report({'INFO'}, f"Auto Unwrap: processed {processed}, skipped {skipped}")
+        translations.report(self, {'INFO'}, f"Auto Unwrap: processed {processed}, skipped {skipped}")
         return {'FINISHED'}
 
     def _unwrap_edit_selection(self, context):
@@ -3025,7 +3025,7 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
         global _LIVE_EXPAND_PENDING_UNWRAP, _LIVE_EXPAND_LAST_SELECTION_TIME
         objects = self._target_objects(context)
         if not objects:
-            self.report({'WARNING'}, "No mesh objects selected")
+            translations.report(self, {'WARNING'}, "No mesh objects selected")
             return {'CANCELLED'}
 
         prev_suppress = _LIVE_EXPAND_SUPPRESS_AUTO_MERGE
@@ -3056,7 +3056,7 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
                         valid_objects.append(obj)
 
                 if not valid_objects:
-                    self.report({'WARNING'}, "No valid mesh objects found")
+                    translations.report(self, {'WARNING'}, "No valid mesh objects found")
                     return {'CANCELLED'}
 
                 context.view_layer.objects.active = valid_objects[0]
@@ -3140,7 +3140,7 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
             _LIVE_EXPAND_SUSPENDED = prev_suspended
 
         if not packed:
-            self.report({'WARNING'}, "Pack UV Islands cancelled")
+            translations.report(self, {'WARNING'}, "Pack UV Islands cancelled")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -3193,7 +3193,7 @@ class AutoMarkEdgesOperator(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
 
                 if "plasticity_id" not in obj.keys():
-                    self.report(
+                    translations.report(self,
                         {'ERROR'}, "Object doesn't have a plasticity_id attribute.")
                     return {'CANCELLED'}
 
@@ -8417,7 +8417,7 @@ class PaintPlasticityFacesOperator(bpy.types.Operator):
     def execute(self, context):
         targets = _collect_paint_target_objects(context)
         if not targets:
-            self.report({'WARNING'}, "No Plasticity mesh selected")
+            translations.report(self, {'WARNING'}, "No Plasticity mesh selected")
             return {'CANCELLED'}
 
         mode = _get_paint_faces_mode(context.scene)
@@ -8436,7 +8436,7 @@ class PaintPlasticityFacesOperator(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
         if painted == 0:
-            self.report({'WARNING'}, "No valid Plasticity face data to paint")
+            translations.report(self, {'WARNING'}, "No valid Plasticity face data to paint")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -8461,7 +8461,7 @@ class CapturePlasticityFaceMaterialMappingOperator(bpy.types.Operator):
     def execute(self, context):
         targets = _collect_paint_target_objects(context)
         if not targets:
-            self.report({'WARNING'}, "No Plasticity mesh selected")
+            translations.report(self, {'WARNING'}, "No Plasticity mesh selected")
             return {'CANCELLED'}
 
         previous_mode = context.mode
@@ -8480,10 +8480,10 @@ class CapturePlasticityFaceMaterialMappingOperator(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
         if captured_objects == 0:
-            self.report({'WARNING'}, "No per-face material assignments found to capture")
+            translations.report(self, {'WARNING'}, "No per-face material assignments found to capture")
             return {'CANCELLED'}
 
-        self.report(
+        translations.report(self,
             {'INFO'},
             f"Captured {captured_faces} face mappings on {captured_objects} object(s)",
         )
@@ -8508,7 +8508,7 @@ class ReapplyPlasticityFaceMaterialMappingOperator(bpy.types.Operator):
     def execute(self, context):
         targets = _collect_paint_target_objects(context)
         if not targets:
-            self.report({'WARNING'}, "No Plasticity mesh selected")
+            translations.report(self, {'WARNING'}, "No Plasticity mesh selected")
             return {'CANCELLED'}
 
         previous_mode = context.mode
@@ -8527,10 +8527,10 @@ class ReapplyPlasticityFaceMaterialMappingOperator(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
         if changed_objects == 0:
-            self.report({'WARNING'}, "No captured face material mappings found to reapply")
+            translations.report(self, {'WARNING'}, "No captured face material mappings found to reapply")
             return {'CANCELLED'}
 
-        self.report(
+        translations.report(self,
             {'INFO'},
             f"Reapplied mapping on {changed_objects} object(s), updated {changed_faces} face(s)",
         )
@@ -8553,7 +8553,7 @@ class ClearPlasticityFaceMaterialMappingOperator(bpy.types.Operator):
     def execute(self, context):
         targets = _collect_paint_target_objects(context)
         if not targets:
-            self.report({'WARNING'}, "No Plasticity mesh selected")
+            translations.report(self, {'WARNING'}, "No Plasticity mesh selected")
             return {'CANCELLED'}
 
         previous_mode = context.mode
@@ -8569,10 +8569,10 @@ class ClearPlasticityFaceMaterialMappingOperator(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
         if cleared_objects == 0:
-            self.report({'WARNING'}, "No captured face material mappings to clear")
+            translations.report(self, {'WARNING'}, "No captured face material mappings to clear")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Cleared face mappings on {cleared_objects} object(s)")
+        translations.report(self, {'INFO'}, f"Cleared face mappings on {cleared_objects} object(s)")
         return {'FINISHED'}
 
 
@@ -8947,7 +8947,7 @@ class NonOverlappingMeshesMerger(bpy.types.Operator):
         return object_data
 
     def merge_meshes(self, obj1, obj2):
-        bpy.ops.object.select_all(action='DESELECT') 
+        bpy.ops.object.select_all(action='DESELECT')
         obj1.select_set(True)
         obj2.select_set(True)
         bpy.context.view_layer.objects.active = obj1
@@ -9011,7 +9011,7 @@ class SimilarGeometrySelector(bpy.types.Operator):
         "Ignores transforms and materials"
     )
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     similarity_threshold: bpy.props.FloatProperty(
     name="Similarity Threshold",
     description="Percentage difference between objects to consider them similar",
@@ -9024,7 +9024,7 @@ class SimilarGeometrySelector(bpy.types.Operator):
         if active_object and active_object.type == 'MESH':
             active_vert_count = len(active_object.data.vertices)
             active_poly_count = len(active_object.data.polygons)
-            
+
             # Calculate total surface area for the active object
             active_surface_area = sum(poly.area for poly in active_object.data.polygons)
 
@@ -9032,10 +9032,10 @@ class SimilarGeometrySelector(bpy.types.Operator):
                 if obj.type == 'MESH':
                     vert_count = len(obj.data.vertices)
                     poly_count = len(obj.data.polygons)
-                    
+
                     # Calculate total surface area for the current object
                     surface_area = sum(poly.area for poly in obj.data.polygons)
-                    
+
                     # Calculate percentage difference for vertices, polygons and surface area
                     vert_diff = abs(vert_count - active_vert_count) / active_vert_count
                     poly_diff = abs(poly_count - active_poly_count) / active_poly_count
@@ -9055,7 +9055,7 @@ class SelectedJoiner(bpy.types.Operator):
 
     def execute(self, context):
         bpy.ops.object.join()
-        
+
         return {'FINISHED'}
 
 class SelectedUnjoiner(bpy.types.Operator):
@@ -9078,14 +9078,14 @@ class SelectedUnjoiner(bpy.types.Operator):
 
             temp_name = obj.name + "_temp_unique_name"
             for new_obj in context.selected_objects:
-                if new_obj not in original_objects: 
+                if new_obj not in original_objects:
                     new_obj.name = temp_name
 
         for obj in bpy.data.objects:
             if obj.name.startswith(temp_name):
                 obj.name = obj.name.replace(temp_name, "")
 
-        return {'FINISHED'}    
+        return {'FINISHED'}
 
 class OpenUVEditorOperator(bpy.types.Operator):
     bl_idname = "object.open_uv_editor"
@@ -9136,7 +9136,7 @@ class OpenUVEditorOperator(bpy.types.Operator):
         new_area.spaces.active.mode = 'UV'
 
         new_area.spaces.active.image = None
-        
+
         return {'FINISHED'}
 
 class MaterialRemover(bpy.types.Operator):
@@ -9184,18 +9184,18 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
         if not filepath:
             return {'CANCELLED'}
         if not os.path.exists(filepath):
-            self.report({'ERROR'}, "Checker image not found")
+            translations.report(self, {'ERROR'}, "Checker image not found")
             return {'CANCELLED'}
         try:
             image = bpy.data.images.load(filepath, check_existing=True)
         except Exception as exc:
-            self.report({'ERROR'}, f"Failed to load image: {exc}")
+            translations.report(self, {'ERROR'}, f"Failed to load image: {exc}")
             return {'CANCELLED'}
 
         material = self._get_checker_material(image)
         objects = self._target_objects(context)
         if not objects:
-            self.report({'WARNING'}, "No mesh objects to assign")
+            translations.report(self, {'WARNING'}, "No mesh objects to assign")
             return {'CANCELLED'}
 
         assigned = 0
@@ -9223,7 +9223,7 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
                 assigned += 1
 
         if assigned == 0:
-            self.report({'WARNING'}, "No selected mesh faces/objects to assign")
+            translations.report(self, {'WARNING'}, "No selected mesh faces/objects to assign")
             return {'CANCELLED'}
         return {'FINISHED'}
 
@@ -9234,17 +9234,17 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
             filepath = getattr(scene, "prop_plasticity_checker_custom_path", "")
             if not filepath:
                 message = "Select a checker image file using the folder button"
-                self.report({'ERROR'}, message)
+                translations.report(self, {'ERROR'}, message)
                 return None
             return bpy.path.abspath(filepath)
 
         filename = getattr(scene, "prop_plasticity_checker_image", "NONE")
         if not filename or filename == "NONE":
-            self.report({'ERROR'}, "Select a checker texture from the list")
+            translations.report(self, {'ERROR'}, "Select a checker texture from the list")
             return None
         resolved = get_checker_filename(filename)
         if not resolved:
-            self.report({'ERROR'}, "Selected checker texture is unavailable")
+            translations.report(self, {'ERROR'}, "Selected checker texture is unavailable")
             return None
         return os.path.join(_checker_images_dir(), resolved)
 
@@ -9326,7 +9326,7 @@ class SelectCheckerImageOperator(bpy.types.Operator):
 
     def execute(self, context):
         if not self.filepath:
-            self.report({'ERROR'}, "Select an image file")
+            translations.report(self, {'ERROR'}, "Select an image file")
             return {'CANCELLED'}
         context.scene.prop_plasticity_checker_custom_path = self.filepath
         context.scene.prop_plasticity_checker_source = "FILE"
@@ -9342,7 +9342,7 @@ class RemoveUVCheckerNodesOperator(bpy.types.Operator):
     def execute(self, context):
         objects = AssignUVCheckerTextureOperator._target_objects(context)
         if not objects:
-            self.report({'WARNING'}, "No mesh objects to update")
+            translations.report(self, {'WARNING'}, "No mesh objects to update")
             return {'CANCELLED'}
         previous_mode = context.mode
         if previous_mode == 'EDIT_MESH':
@@ -9377,10 +9377,10 @@ class RemoveUVCheckerNodesOperator(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='EDIT')
 
         if removed_slots == 0:
-            self.report({'INFO'}, "No checker materials assigned")
+            translations.report(self, {'INFO'}, "No checker materials assigned")
             return {'FINISHED'}
 
-        self.report(
+        translations.report(self,
             {'INFO'},
             f"Removed {removed_slots} checker material slot(s) on {updated_objects} object(s), {updated_meshes} mesh(es)",
         )
@@ -9473,7 +9473,7 @@ class CloseUVEditorOperator(bpy.types.Operator):
                 break
 
         if target_window is None:
-            self.report({'INFO'}, "No UV editor window found.")
+            translations.report(self, {'INFO'}, "No UV editor window found.")
             return {'CANCELLED'}
 
         with context.temp_override(window=target_window):
@@ -9505,9 +9505,9 @@ class ImportFBXOperator(bpy.types.Operator):
                 )
                 if success:
                     return {'FINISHED'}
-                self.report({'WARNING'}, f"{error_message} Falling back to Blender FBX.")
+                translations.report(self, {'WARNING'}, f"{error_message} Falling back to Blender FBX.")
             else:
-                self.report(
+                translations.report(self,
                     {'WARNING'},
                     "Better FBX importer not found. Falling back to Blender FBX.",
                 )
@@ -9518,7 +9518,7 @@ class ImportFBXOperator(bpy.types.Operator):
             self.filepath,
         )
         if not success:
-            self.report({'ERROR'}, error_message)
+            translations.report(self, {'ERROR'}, error_message)
             return {'CANCELLED'}
         return {'FINISHED'}
 
@@ -9534,9 +9534,9 @@ class ImportFBXOperator(bpy.types.Operator):
                 )
                 if success:
                     return result
-                self.report({'WARNING'}, f"{error_message} Falling back to Blender FBX.")
+                translations.report(self, {'WARNING'}, f"{error_message} Falling back to Blender FBX.")
             else:
-                self.report(
+                translations.report(self,
                     {'WARNING'},
                     "Better FBX importer not found. Falling back to Blender FBX.",
                 )
@@ -9750,9 +9750,9 @@ class ExportFBXOperator(bpy.types.Operator):
                 )
                 if success:
                     return {'FINISHED'}
-                self.report({'WARNING'}, f"{error_message} Falling back to Blender FBX.")
+                translations.report(self, {'WARNING'}, f"{error_message} Falling back to Blender FBX.")
             else:
-                self.report(
+                translations.report(self,
                     {'WARNING'},
                     "Better FBX exporter not found. Falling back to Blender FBX.",
                 )
@@ -9763,7 +9763,7 @@ class ExportFBXOperator(bpy.types.Operator):
             self.filepath,
         )
         if not success:
-            self.report({'ERROR'}, error_message)
+            translations.report(self, {'ERROR'}, error_message)
             return {'CANCELLED'}
         return {'FINISHED'}
 
@@ -9779,9 +9779,9 @@ class ExportFBXOperator(bpy.types.Operator):
                 )
                 if success:
                     return result
-                self.report({'WARNING'}, f"{error_message} Falling back to Blender FBX.")
+                translations.report(self, {'WARNING'}, f"{error_message} Falling back to Blender FBX.")
             else:
-                self.report(
+                translations.report(self,
                     {'WARNING'},
                     "Better FBX exporter not found. Falling back to Blender FBX.",
                 )
@@ -9807,7 +9807,7 @@ class ImportOBJOperator(bpy.types.Operator):
             try:
                 result = bpy.ops.import_scene.obj(filepath=self.filepath)
             except Exception as exc:
-                self.report({'ERROR'}, f"OBJ import failed: {exc}")
+                translations.report(self, {'ERROR'}, f"OBJ import failed: {exc}")
                 return {'CANCELLED'}
 
         return result
@@ -9838,7 +9838,7 @@ class ExportOBJOperator(bpy.types.Operator):
                 result = bpy.ops.export_scene.obj(
                     filepath=self.filepath, use_selection=True)
             except Exception as exc:
-                self.report({'ERROR'}, f"OBJ export failed: {exc}")
+                translations.report(self, {'ERROR'}, f"OBJ export failed: {exc}")
                 return {'CANCELLED'}
 
         return result
@@ -10024,7 +10024,7 @@ class SelectMeshesWithNgons(bpy.types.Operator):
                         bpy.context.view_layer.objects.active = obj
                         break
 
-        self.report({'INFO'}, "Selected all objects with ngons!")
+        translations.report(self, {'INFO'}, "Selected all objects with ngons!")
         return {'FINISHED'}
 
 

@@ -1460,6 +1460,7 @@ class SceneHandler:
         self.list_only_new = False
 
     def report(self, level, message):
+        message = bpy.app.translations.pgettext_iface(message)
         print(message)
 
     def _update_status_text(self, text, force=False):

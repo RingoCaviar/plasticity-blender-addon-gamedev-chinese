@@ -116,3 +116,4 @@ license-key.json
 __pycache__/
 *.py[cod]
 *$py.class
+dist/

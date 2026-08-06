@@ -1,7 +1,8 @@
-﻿import bpy
+import bpy
 import math
 import os
 
+from . import translations
 from .__init__ import plasticity_client
 from .__init__ import load_presets
 from .client import FacetShapeType, MessageType
@@ -270,10 +271,10 @@ class ConnectButton(bpy.types.Operator):
     def execute(self, context):
         server = context.scene.prop_plasticity_server
         plasticity_client.connect(server)
-        
+
         # Load the refacet presets after connecting (not ideal, but works for now).
         load_presets(context.scene)
-        
+
         return {'FINISHED'}
 
 
@@ -321,7 +322,7 @@ class ListButton(bpy.types.Operator):
             _begin_refresh_request(context, on_complete=on_complete)
         except Exception as exc:
             _clear_pending_refresh_state()
-            self.report({'ERROR'}, f"Refresh failed: {exc}")
+            translations.report(self, {'ERROR'}, f"Refresh failed: {exc}")
             return {'CANCELLED'}
         return {'FINISHED'}
 
@@ -346,7 +347,7 @@ class SendToPlasticityButton(bpy.types.Operator):
     def execute(self, context):
         objects = _selected_send_mesh_objects(context)
         if not objects:
-            self.report({'ERROR'}, "Select one or more mesh objects.")
+            translations.report(self, {'ERROR'}, "Select one or more mesh objects.")
             return {'CANCELLED'}
 
         create_subd = bool(context.scene.prop_plasticity_send_create_subd)
@@ -363,7 +364,7 @@ class SendToPlasticityButton(bpy.types.Operator):
             _begin_refresh_request(context, on_complete=on_complete)
         except Exception as exc:
             _clear_pending_refresh_state()
-            self.report({'ERROR'}, f"Unable to query Plasticity filename before sending: {exc}")
+            translations.report(self, {'ERROR'}, f"Unable to query Plasticity filename before sending: {exc}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -447,8 +448,8 @@ class RefacetButton(bpy.types.Operator):
         max_width = 0
         curve_chord_max = 0
 
-        if context.scene.prop_plasticity_ui_show_advanced_facet:            
-            if len(context.scene.refacet_presets) > 0: 
+        if context.scene.prop_plasticity_ui_show_advanced_facet:
+            if len(context.scene.refacet_presets) > 0:
                 surface_plane_tolerance = preset.Face_plane_tolerance
                 surface_plane_angle = preset.Face_Angle_tolerance
                 curve_chord_tolerance = preset.Edge_chord_tolerance
@@ -464,8 +465,8 @@ class RefacetButton(bpy.types.Operator):
             else:
                 surface_plane_tolerance = context.scene.prop_plasticity_surface_plane_tolerance
                 surface_plane_angle = context.scene.prop_plasticity_surface_angle_tolerance
-                curve_chord_tolerance = context.scene.prop_plasticity_curve_chord_tolerance            
-                curve_chord_angle = context.scene.prop_plasticity_curve_angle_tolerance                
+                curve_chord_tolerance = context.scene.prop_plasticity_curve_chord_tolerance
+                curve_chord_angle = context.scene.prop_plasticity_curve_angle_tolerance
                 min_width = (
                     context.scene.prop_plasticity_facet_min_width
                     if context.scene.prop_plasticity_facet_min_width_enabled
@@ -493,7 +494,7 @@ class RefacetButton(bpy.types.Operator):
                 shape = FacetShapeType.CONVEX
 
         plasticity_ids_by_filename = {}
-        
+
         for obj in _collect_refacet_target_objects(context):
             if "plasticity_filename" in obj.keys():
                 if obj["plasticity_filename"] not in plasticity_ids_by_filename.keys():
@@ -533,7 +534,7 @@ class PlasticityPanel(bpy.types.Panel):
         if plasticity_client.connected:
             disconnect_button = layout.operator(
                 "wm.disconnect_button", text="Disconnect")
-            layout.label(text="Connected to " + plasticity_client.server)
+            layout.label(text=bpy.app.translations.pgettext_iface("Connected to ") + plasticity_client.server)
         else:
             box = layout.box()
             connect_button = box.operator(
@@ -542,7 +543,7 @@ class PlasticityPanel(bpy.types.Panel):
 
         if plasticity_client.connected:
             if plasticity_client.filename:
-                layout.label(text="Filename: " + plasticity_client.filename)
+                layout.label(text=bpy.app.translations.pgettext_iface("Filename: ") + plasticity_client.filename)
 
             layout.separator()
 
@@ -1203,7 +1204,7 @@ class PlasticityPanel(bpy.types.Panel):
                         curve_value = curve_box.column()
                         curve_value.enabled = scene.prop_plasticity_curve_max_length_enabled
                         curve_value.prop(scene, "prop_plasticity_curve_max_length", text="")
-    
+
             elif active_tab == "UTILITIES":
                 box = layout.box()
                 col = box.column(align=True)
@@ -1423,7 +1424,7 @@ class PlasticityPanel(bpy.types.Panel):
                              text="Plasticity Edge Highlight Color")
                     row.prop(scene, "prop_plasticity_pin_live_expand_overlay_color",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_overlay_color"), emboss=False)
-    
+
             elif active_tab == "UV_TOOLS":
                 box = layout.box()
                 col = box.column(align=True)
@@ -1487,7 +1488,7 @@ class PlasticityPanel(bpy.types.Panel):
                     path_label = scene.prop_plasticity_checker_custom_path or "No file selected"
                     row.label(text=path_label)
                     row.operator("object.select_checker_image", text="", icon="FILE_FOLDER")
-    
+
             elif active_tab == "MESH_TOOLS":
                 box = layout.box()
                 col = box.column(align=True)
