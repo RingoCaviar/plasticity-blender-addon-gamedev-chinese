@@ -2,8 +2,8 @@
 
 # Plasticity Blender Addon Gamedev
 
-[![Version](https://img.shields.io/badge/version-1.3.2-2ea44f)](#version-132-updates)
-[![Blender](https://img.shields.io/badge/Blender-4.3%2B-E87D0D?logo=blender&logoColor=white)](#version-12-updates)
+[![Version](https://img.shields.io/badge/version-1.4.0-2ea44f)](#latest-release-140)
+[![Blender](https://img.shields.io/badge/Blender-4.3%2B-E87D0D?logo=blender&logoColor=white)](CHANGELOG.md#version-12-updates)
 [![License](https://img.shields.io/badge/license-MIT-0969da)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/User129863/plasticity-blender-addon-gamedev?logo=github)](https://github.com/User129863/plasticity-blender-addon-gamedev/stargazers)
 
@@ -35,148 +35,35 @@ Unofficial fork that regularly incorporates the latest improvements from the off
 
 </div>
 
-## Upstreamed into the official add-on workflow
+## Latest Release: 1.4.0
 
-These features were developed in this fork first and were later upstreamed, so they are part of the official Plasticity Blender add-on workflow:
+- **Preserve UV Seams:** retain CAD-face boundary seams and merged islands when updating meshes through Refresh or Refacet.
+- **Preserve UVs:** transfer existing UV layouts when updating meshes from Plasticity, helping textures stay aligned.
+- **Live UV Update modes:** choose **Unwrap**, **Box Project**, or **Off** after seam edits. The add-on now manages live UV updates, so you no longer need to enable Blender's **Live Unwrap** separately. Box Project includes an adjustable projection size.
+- **Preserve Existing Seams when unwrapping:** unwrap using your current seams without automatically rebuilding CAD-face boundaries, keeping manually merged islands together.
+- **Select regions enclosed by seams:** while Live Expand is enabled, **Alt+Click** selects a seam-bound region and **Ctrl+Alt+Click** deselects it.
+- **Improved Auto Select Cylinders:** better detection of cylindrical and rounded-slot walls, with improved exclusion of caps and transition fillets. Cylinder selection is no longer marked experimental.
+- **Seam Toward Camera:** steer automatic cylinder seam placement by rotating your view so the desired side faces you. The add-on favors an edge path on that side, giving you approximate control over the seam's position. Replaces the previous Occluded Only option.
+- **Simplified cylinder seam controls:** removed the separate Cylinder Seam Mode and Partial Wrap Angle settings.
+- **Improved Sphere Cap / Opening workflow:** dedicated UV projection for spherical caps and openings, with adjustable cap size and cap-and-band layouts for deeper shapes.
+- **New UV packing modes:** **Aligned** preserves island orientation, **Cardinal** allows 90° rotations, and **Maximum Coverage** allows free rotation and tighter packing.
+- **Toggle Checker Texture:** a single button applies or removes the checker texture and restores previous material assignments.
+- **Tools available while disconnected:** access UV tools, mesh tools, and other local utilities without an active Plasticity connection.
+- **Expanded Refacet ranges:** minimum tolerance reduced from **0.0001 to 0.000001**, and minimum angle reduced from **0.1 to 0.01**, across controls and presets.
 
-- AutoMarkEdgesOperator: consolidates "Mark Sharp" and "Mark Sharp at boundaries" into a single operator with modes to mark selection as Hard Edges (Sharp) or UV Seams (Seam).
-- Smart edge marking (Sharp/Seam): operates on entire-mesh selections (not individually selected polygons inside a Plasticity group) and applies edge marking using the same boundary logic as MarkSharpEdgesForPlasticityGroupsWithSplitNormalsOperator.
-- Arbitrary group-polygon boundary marking (Sharp/Seam): allows selecting polygons belonging to Plasticity surface groups and marking their selection boundary (instead of only marking boundaries of individual Plasticity surfaces).
-- UV seam merge from arbitrary group selections: merges existing UV seams based on an arbitrary polygon selection within Plasticity groups.
-- Plasticity group edge selection: utilities to select edges corresponding to Plasticity group boundaries.
+[View older releases](CHANGELOG.md)
 
-This fork continues beyond upstream and adds additional GameDev-focused workflow changes, targeting real-time asset preparation (game-ready topology/edge control, UV workflow, and export-oriented tooling).
+## Installation
 
-## Version 1.0 features
+Requires **Blender 4.3 or newer**.
 
-- Fillet-aware selection in Select Plasticity Face(s): optional adjacent-fillet mode expands selection by curvature/area thresholds; vertex adjacency helps bridge tight corners; setting Min Curvature Angle to 0 includes chamfers.
-- Refacet presets for game-ready topology control: save per-object remesh parameters to control mesh density and edge/silhouette fidelity, useful for consistent edge control and poly-budget management on CAD-derived meshes.
-- Refacet UI quality of life: Tri/Ngon stored in presets; simple Tolerance/Angle fields always visible; Advanced is a pure toggle for extra settings.
-- Refresh filtering: new toggles for "Only selected objects in Blender" and "Only visible in Plasticity"; enable either or both to constrain refresh to selected Blender objects, visible Plasticity items, or their intersection.
-- UI reorganization: compact, collapsible sections to reduce panel height and speed scanning during production.
-- Select Similar Geometry: fuzzy match by vertex/poly counts and total surface area relative to the active object; ignores transforms/materials. Useful for quickly grabbing similar meshes; approximate and may include false positives.
-- Join Selected: join selected objects into the active object. Destructive.
-- Unjoin Selected: separate selected meshes by loose parts; creates new objects and may change names.
-- Select Meshes with Ngons: scan the scene and select meshes that contain ngons (>4 vertices).
-- Mirror Selected: duplicate and mirror selected objects around the chosen axis and center; uses the 3D cursor pivot temporarily.
-- Remove Modifiers: remove all modifiers from selected objects. Destructive.
-- Apply Modifiers: apply all modifiers on selected objects; destructive and may change topology.
-- Remove Vertex Groups: remove all vertex groups from selected mesh objects. Destructive.
-- Merge Non-overlapping Meshes: supports selection-only vs visible objects, with threshold exposed in the redo panel; optimized overlap checks (AABB fast reject + KDTree distance checks, name-based resolution to avoid stale refs); useful for batching and for baking workflows that use bevel-shader techniques, decreases bake times in Blender.
-- UV workflow tools: open/close UV editor, select meshes without UVs, remove UVs, and material/texture cleanup grouped together.
-- Import/export utilities: FBX and OBJ import/export with modern operator support and legacy fallback.
+1. Download the add-on **ZIP file** from the [Releases page](https://github.com/User129863/plasticity-blender-addon-gamedev/releases). Leave the ZIP file compressed.
+2. If you have a previous Plasticity bridge add-on installed, remove it in **Edit > Preferences > Add-ons** before installing this version.
+3. In **Edit > Preferences > Add-ons**, open the menu in the upper-right corner and choose **Install from Disk**.
+4. Select the downloaded ZIP file and confirm the installation.
+5. Search for **Plasticity Blender Addon Gamedev** and enable its checkbox.
+6. Restart Blender, then press **N** in the 3D Viewport and open the **Plasticity GameDev** sidebar tab.
 
-## Version 1.1 updates
+**Connect to Plasticity**
 
-Latest workflow updates focused on multi-object UV tools, improved overlays, and a more streamlined checker texture workflow.
-
-- Live Expand Selection (multi-object): this is a live paint-select workflow for Plasticity faces. While Live Expand is enabled, you can circle-select faces and the tool continuously expands the selection to full Plasticity face groups (with optional adjacent-fillet expansion) across all selected edit-mode objects. When Live Unwrap 3D is on, the UV unwrap updates immediately as you paint, so selection, seam changes (Auto Merge + Auto Cylinder if enabled), and UV layout become a single continuous pass instead of separate steps.
-- Merge UV Seams (multi-object): merge operations now run across all selected edit-mode objects instead of only the active object.
-- Plasticity Edge Highlight: optional overlay highlighting for Plasticity edges with active-view-only, occlusion, thickness, and color controls.
-- Relax UVs (multi-object): relax now operates on any selected faces across multiple edit-mode objects (requires Blender 4.3+).
-- UV editor open/close: opening the UV editor no longer forces a select-all pass, so selections are preserved and auto-merge seams will not be unintentionally triggered.
-- Checker textures workflow: bundled checker library with preview grid and default selection (UVChecker-color-1024x1024), plus custom file selection via path picker.
-
-## Version 1.2 updates
-
-Major UI refactor: Replaced the previous dense single-panel layout with a tabbed workflow to reduce visual overload and make operator groups easier to navigate:
-
-- Pinned
-- Main
-- Refacet
-- Utilities
-- UV / Material / Texture Tools
-- Mesh Tools
-- Preferences
-
-New: Pinned workflow: Added a dedicated Pinned tab for quick access to frequently used controls/operators, with:
-
-- Improved default pinned set for common workflows
-- Expanded pin coverage across key tools
-
-Auto Merge / Reset Seams on Selection: Renamed for clarity and updated behavior/tooltip:
-
-- Single click: resets seams on the targeted Plasticity face
-- Click + drag: continuously merges/resets as selection changes
-
-Selection-driven seam automation: Auto seam merge/reset no longer depends on Live Expand or Auto Circle and now works reliably with standard selection workflows.
-
-Multi-object seam reliability: Merge seams and auto create seam modes (including cylinder and sphere paths) now behave consistently across multiple selected Edit Mode objects.
-
-Multi-object Relax UVs reliability: Relax now applies correctly across selected faces on multiple selected Edit Mode objects and is more stable after repeated seam + unwrap operations.
-
-New: Pack UV Islands operator: Added under UV / Material / Texture Tools -> Unwrap for pack-only workflows (no unwrap). Defaults:
-
-- Average Islands Scale: ON
-- Rotate Islands: OFF
-
-Preferences tab: Added a dedicated place for global behavior options, including Auto Assign Checker on Selection.
-
-Add-on metadata update: Updated bl_info for the fork:
-
-- Plasticity Blender Addon Gamedev
-- Version: 1.2.0
-- Updated fork description
-- Minimum Blender: 4.3+
-
-## Version 1.2.2 Updates
-
-- Improved Live Refacet behavior with Live Link workflows.
-- Live Refacet now supports Live Link-aware targeting logic.
-- Live Link updates target updated Plasticity objects.
-- Reduced unnecessary repaint/refacet work in larger Live Link scenes.
-- Live Paint / Paint Plasticity Faces: Added new Live Paint mode controls for Paint Plasticity Faces.
-- Live Paint / Paint Plasticity Faces: Live Paint options for Paint Plasticity Faces.
-- Live Paint / Paint Plasticity Faces: Paint mode (Material + Attribute / Attribute Only).
-- Live Paint / Paint Plasticity Faces: Custom color attribute name.
-- Live Paint / Paint Plasticity Faces: Live Paint toggle to auto-refresh Plasticity face colors.
-- Live Paint / Paint Plasticity Faces: Face color attribute creation now uses BYTE_COLOR.
-- Live Paint / Paint Plasticity Faces: Face painting colors aren't random anymore.
-- Multiple UV workflow stability fixes for Blender 5.x.
-- Fixed UV seam/unwrap/relax interactions causing texel density drift in Blender 5.x workflows.
-- Fixed cases where relaxed UV changes contaminated adjacent non-target surfaces.
-- Blender 5.x behavior handling improved in UV and Live Refacet paths.
-
-## Version 1.2.3 updates
-
-- New (Experimental): Live Expand `Auto Select Cylinders` for faster cylindrical surface selection workflows.
-- New (Experimental): `Cylinder Min Wrap Angle` setting to tune cylinder auto-selection sensitivity.
-- Live Expand Selection: when Live Expand mode is ON, hold Ctrl while using Circle Select, Auto Circle Select Mode, or Box/Rectangle selection to unselect Plasticity surfaces.
-- General bug fixes and stability improvements.
-
-https://github.com/user-attachments/assets/2dd4efb0-cb47-4379-9c01-1dccc4edc275
-
-## Version 1.2.4 updates
-
-- Added a new FBX option in Preferences: users who own the Better FBX Importer & Exporter for Blender can select it for both FBX import and export.
-- Merge Seams fixes when multiple objects are selected.
-- General bug fixes and stability improvements.
-
-## Version 1.3 updates
-
-- Added a new Plasticity Object Transform Control option in Mesh Tools.
-- Blender can now preserve locally edited pivot, object position, and object rotation through refacet/refresh when the control is set to Blender, making it easier to do assembly work directly in Blender.
-- General bug fixes and stability improvements.
-- Model by Yann Goument.
-
-https://github.com/user-attachments/assets/bed96ba8-e440-4f40-ba1c-5b3c95cbf68b
-
-<img width="332" height="616" alt="image" src="https://github.com/user-attachments/assets/17993347-a8d1-4f6f-85d6-de8c33d2bd8e" />
-
-## Version 1.3.1 updates
-
-- Added: Only new objects in Plasticity option to Refresh.
-- When enabled, Refresh imports only new Plasticity objects that are not already in the Blender scene, preventing existing imported objects from being refreshed.
-
-## Version 1.3.2 updates
-
-- Added: Support for the Blender-to-Plasticity PolySpline workflow. New Send to Plasticity button in the Main tab.
-- Note: Meshes sent through this workflow must have a Sub-D modifier.
-- Added: Auto-Create Sub D modifier option before sending mesh to Plasticity.
-- Added: Exposed PolySpline options in Blender: Rounded corners, Merge patches, and Interpolate boundary exactly.
-- Added: Multi-object send support.
-- Added: Automatic loose-parts separation during send.
-
-https://github.com/user-attachments/assets/6e29f8ec-b462-414b-9091-e373f7d5f232
-
-https://github.com/user-attachments/assets/e524569c-2892-42ee-a86b-ee753772e68e
+Open your model in Plasticity and enable its Blender bridge server. In Blender, keep the server address set to `localhost:8980` when both applications run on the same computer, then click **Connect**. Use **Refresh** in the Main tab to bring your model into Blender, or enable **Live link** for ongoing updates.

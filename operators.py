@@ -5,6 +5,7 @@ import colorsys
 import re
 import time
 import zlib
+from array import array
 
 import bmesh
 import bpy
@@ -283,21 +284,16 @@ class SelectByFaceIDOperator(bpy.types.Operator):
 
             seam_mode = str(getattr(scene, "prop_plasticity_auto_seam_mode", "CYLINDER"))
             sphere_projected = False
-            occluded_only = bool(
-                getattr(scene, "prop_plasticity_auto_cylinder_seam_occluded_only", False)
+            seam_facing = bool(
+                getattr(scene, "prop_plasticity_auto_cylinder_seam_facing", False)
             )
-            view_context = _find_view3d_region(scene) if occluded_only else None
+            view_context = _find_view3d_region(scene) if seam_facing else None
 
             if seam_mode == 'CYLINDER':
                 cylinder_changed = _auto_cylinder_seam_on_selection(
                     bm,
                     selected_faces,
-                    mode=str(scene.prop_plasticity_auto_cylinder_seam_mode),
-                    partial_angle=float(scene.prop_plasticity_auto_cylinder_partial_angle),
-                    occluded_only=occluded_only,
-                    obj=obj,
-                    scene=scene,
-                    view_context=view_context,
+                    seam_view=_seam_view_in_object(obj, view_context),
                 )
                 if cylinder_changed:
                     changed_to_true.extend(cylinder_changed)
@@ -306,6 +302,7 @@ class SelectByFaceIDOperator(bpy.types.Operator):
                     bm,
                     selected_faces,
                     mode=seam_mode,
+                    obj=obj,
                 )
                 if sphere_changed:
                     changed_to_true.extend(sphere_changed)
@@ -393,6 +390,74 @@ class SelectByFaceIDEdgeOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SelectSeamBoundRegionOperator(bpy.types.Operator):
+    bl_idname = "plasticity.select_seam_bound_region"
+    bl_label = "Select Seam-Bound Region"
+    bl_description = (
+        "Select every face of the region enclosed by seams around the "
+        "clicked face (Live Expand: Alt+Click; Ctrl+Alt+Click deselects)"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    deselect: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        # Only takes over Alt+Click while Live Expand is on; otherwise the
+        # event falls through to Blender's default loop select.
+        return (
+            context.mode == 'EDIT_MESH'
+            and bool(getattr(context.scene, "prop_plasticity_live_expand", False))
+        )
+
+    def invoke(self, context, event):
+        # Let the regular picking machinery resolve the face under the
+        # cursor (occlusion-correct), extending so the selection is kept.
+        try:
+            bpy.ops.view3d.select(
+                'INVOKE_DEFAULT',
+                extend=True,
+                location=(event.mouse_region_x, event.mouse_region_y),
+            )
+        except RuntimeError:
+            return {'CANCELLED'}
+
+        obj = context.active_object
+        mesh = obj.data
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        seed = bm.faces.active
+        if seed is None or seed.hide:
+            return {'CANCELLED'}
+
+        # Flood across every edge that is not a seam.
+        region = {seed.index}
+        stack = [seed]
+        while stack:
+            face = stack.pop()
+            for edge in face.edges:
+                if edge.seam:
+                    continue
+                for linked in edge.link_faces:
+                    if linked.index in region or linked.hide:
+                        continue
+                    region.add(linked.index)
+                    stack.append(linked)
+
+        target = not self.deselect
+        for face_index in region:
+            bm.faces[face_index].select = target
+        if self.deselect:
+            seed.select = False
+            bm.select_flush(False)
+        else:
+            bm.select_flush(True)
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        self.report({'INFO'}, ("Deselected" if self.deselect else "Selected")
+                    + f" {len(region)} faces bound by seams")
+        return {'FINISHED'}
+
+
 class MergeUVSeams(bpy.types.Operator):
     bl_idname = "mesh.merge_uv_seams"
     bl_label = "Merge UV Seams"
@@ -447,10 +512,10 @@ class MergeUVSeams(bpy.types.Operator):
             self.report({'WARNING'}, "Select faces to merge UV seams")
             return {'CANCELLED'}
 
-        occluded_only = bool(
-            getattr(context.scene, "prop_plasticity_auto_cylinder_seam_occluded_only", False)
+        seam_facing = bool(
+            getattr(context.scene, "prop_plasticity_auto_cylinder_seam_facing", False)
         )
-        view_context = _find_view3d_region(context.scene) if occluded_only else None
+        view_context = _find_view3d_region(context.scene) if seam_facing else None
         seam_mode = str(
             getattr(context.scene, "prop_plasticity_auto_seam_mode", "CYLINDER")
         )
@@ -487,12 +552,7 @@ class MergeUVSeams(bpy.types.Operator):
                     cylinder_changed = _auto_cylinder_seam_on_selection(
                         bm,
                         expanded_faces,
-                        mode=str(context.scene.prop_plasticity_auto_cylinder_seam_mode),
-                        partial_angle=float(context.scene.prop_plasticity_auto_cylinder_partial_angle),
-                        occluded_only=occluded_only,
-                        obj=obj,
-                        scene=context.scene,
-                        view_context=view_context,
+                        seam_view=_seam_view_in_object(obj, view_context),
                     )
                     if cylinder_changed:
                         changed_to_true.extend(cylinder_changed)
@@ -501,6 +561,7 @@ class MergeUVSeams(bpy.types.Operator):
                         bm,
                         expanded_faces,
                         mode=seam_mode,
+                        obj=obj,
                     )
                     if sphere_changed:
                         changed_to_true.extend(sphere_changed)
@@ -836,16 +897,17 @@ def _is_uv_editor_live_unwrap_enabled(context):
     return False
 
 
+def _live_update_mode(scene):
+    """The add-on's Live Update dropdown: UNWRAP / BOX / OFF."""
+    return str(getattr(scene, "prop_plasticity_live_update_mode", "UNWRAP"))
+
+
 def _is_live_unwrap_enabled(context):
-    if _is_uv_editor_live_unwrap_enabled(context):
-        return True
-    if not context:
-        return False
-    scene = getattr(context, "scene", None)
-    tool_settings = scene.tool_settings if scene else None
-    if tool_settings and getattr(tool_settings, "use_edge_path_live_unwrap", False):
-        return True
-    return False
+    # The dropdown is authoritative: UNWRAP mode means live solver updates
+    # regardless of Blender's Live Unwrap toggles (those are managed by the
+    # dropdown and only steer Blender's native behaviors).
+    scene = getattr(context, "scene", None) if context else None
+    return _live_update_mode(scene) == 'UNWRAP'
 
 
 def _relax_run_uv_op(context, op_fn, force_uv_sync=False, suspend_live_unwrap=True, **kwargs):
@@ -1373,12 +1435,9 @@ def _prime_live_expand_selection_cache_for_objects(context, objects):
     auto_select_cylinders_signature = bool(
         getattr(scene, "prop_plasticity_live_expand_auto_select_cylinders", False)
     )
-    if auto_select_cylinders_signature:
-        min_wrap_angle_signature = 120.0
-    else:
-        min_wrap_angle_signature = float(
-            getattr(scene, "prop_plasticity_live_expand_cylinder_min_wrap_angle", 120.0)
-        )
+    min_wrap_angle_signature = float(
+        getattr(scene, "prop_plasticity_live_expand_cylinder_min_wrap_angle", 120.0)
+    )
 
     settings_signature = (
         bool(scene.prop_plasticity_select_adjacent_fillets),
@@ -1390,7 +1449,7 @@ def _prime_live_expand_selection_cache_for_objects(context, objects):
         auto_select_cylinders_signature,
         min_wrap_angle_signature,
     )
-    occluded_only = bool(getattr(scene, "prop_plasticity_auto_cylinder_seam_occluded_only", False))
+    seam_facing = bool(getattr(scene, "prop_plasticity_auto_cylinder_seam_facing", False))
     merge_enabled = (
         bool(getattr(scene, "prop_plasticity_live_expand_auto_merge_seams", False))
         and not _LIVE_EXPAND_SUPPRESS_AUTO_MERGE
@@ -1398,9 +1457,7 @@ def _prime_live_expand_selection_cache_for_objects(context, objects):
     merge_settings = (
         merge_enabled,
         str(getattr(scene, "prop_plasticity_auto_seam_mode", "CYLINDER")),
-        str(scene.prop_plasticity_auto_cylinder_seam_mode),
-        float(scene.prop_plasticity_auto_cylinder_partial_angle),
-        occluded_only,
+        seam_facing,
     )
 
     for obj in (objects or []):
@@ -1695,13 +1752,23 @@ def _unwrap_kwargs_from_tool_settings(tool_settings):
     return kwargs
 
 
-def _pack_islands_kwargs(margin, rotate, merge_overlap=False):
+def _pack_islands_kwargs(margin, rotate, merge_overlap=False,
+                         rotate_method=None, shape_method=None, scale=None,
+                         margin_method=None):
     kwargs = {
         "margin": margin,
         "rotate": rotate,
     }
     if merge_overlap is not None:
         kwargs["merge_overlap"] = merge_overlap
+    if rotate_method is not None:
+        kwargs["rotate_method"] = rotate_method
+    if shape_method is not None:
+        kwargs["shape_method"] = shape_method
+    if scale is not None:
+        kwargs["scale"] = scale
+    if margin_method is not None:
+        kwargs["margin_method"] = margin_method
 
     try:
         props = bpy.ops.uv.pack_islands.get_rna_type().properties
@@ -1712,6 +1779,118 @@ def _pack_islands_kwargs(margin, rotate, merge_overlap=False):
             "rotate": rotate,
         }
     return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _uv_islands(bm, uv_layer):
+    """Faces grouped by UV connectivity: an edge joins two faces only when
+    both of its UV corners match on either side."""
+    parent = {face.index: face.index for face in bm.faces}
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def corner_pair(loop):
+        a = loop[uv_layer].uv
+        b = loop.link_loop_next[uv_layer].uv
+        return frozenset((
+            (round(a.x, 6), round(a.y, 6)),
+            (round(b.x, 6), round(b.y, 6)),
+        ))
+
+    for edge in bm.edges:
+        if len(edge.link_faces) != 2:
+            continue
+        face_a, face_b = edge.link_faces
+        loop_a = next((l for l in face_a.loops if l.edge == edge), None)
+        loop_b = next((l for l in face_b.loops if l.edge == edge), None)
+        if loop_a is None or loop_b is None:
+            continue
+        if corner_pair(loop_a) == corner_pair(loop_b):
+            root_a, root_b = find(face_a.index), find(face_b.index)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+    grouped = {}
+    for face in bm.faces:
+        grouped.setdefault(find(face.index), []).append(face)
+    return list(grouped.values())
+
+
+def _uv_face_area(face, uv_layer):
+    loops = face.loops
+    area = 0.0
+    for i in range(1, len(loops) - 1):
+        p0 = loops[0][uv_layer].uv
+        p1 = loops[i][uv_layer].uv
+        p2 = loops[i + 1][uv_layer].uv
+        area += abs((p1.x - p0.x) * (p2.y - p0.y)
+                    - (p2.x - p0.x) * (p1.y - p0.y)) * 0.5
+    return area
+
+
+def _uv_island_stats(faces, uv_layer):
+    us = [l[uv_layer].uv.x for f in faces for l in f.loops]
+    vs = [l[uv_layer].uv.y for f in faces for l in f.loops]
+    if not us:
+        return None
+    width = max(us) - min(us)
+    height = max(vs) - min(vs)
+    bbox = width * height
+    area = sum(_uv_face_area(f, uv_layer) for f in faces)
+
+    spread = _normal_spread_degrees(
+        [f.normal for f in faces if f.normal.length > 1e-9])
+
+    island_ids = {f.index for f in faces}
+    perimeter = 0.0
+    for face in faces:
+        for loop in face.loops:
+            linked = loop.edge.link_faces
+            if len(linked) != 2 or any(f.index not in island_ids for f in linked):
+                perimeter += (loop[uv_layer].uv
+                              - loop.link_loop_next[uv_layer].uv).length
+    compactness = (4.0 * math.pi * area) / (perimeter ** 2) if perimeter > 1e-9 else 0.0
+
+    return {
+        "faces": faces,
+        "area": area,
+        "bbox": bbox,
+        "fill": area / bbox if bbox > 1e-12 else 0.0,
+        "width": width,
+        "height": height,
+        "normal_spread": spread,
+        "compactness": compactness,
+    }
+
+
+def _uv_coverage_fraction(objects):
+    """Summed UV face area over the active layer; 1.0 fills the unit square."""
+    total = 0.0
+    seen = set()
+    for obj in objects:
+        mesh = getattr(obj, "data", None)
+        if mesh is None or mesh.as_pointer() in seen:
+            continue
+        seen.add(mesh.as_pointer())
+        uv_layer = mesh.uv_layers.active if mesh.uv_layers else None
+        if uv_layer is None:
+            continue
+        data = uv_layer.data
+        for poly in mesh.polygons:
+            start = poly.loop_start
+            count = poly.loop_total
+            if count < 3:
+                continue
+            u0, v0 = data[start].uv
+            for i in range(1, count - 1):
+                u1, v1 = data[start + i].uv
+                u2, v2 = data[start + i + 1].uv
+                total += abs((u1 - u0) * (v2 - v0)
+                             - (u2 - u0) * (v1 - v0)) * 0.5
+    return total
 
 
 class RelaxUVsPlasticityOperator(bpy.types.Operator):
@@ -2137,7 +2316,9 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
     )
     preserve_existing_seams: bpy.props.BoolProperty(
         name="Preserve Existing Seams",
-        description="Keep existing seams and add Plasticity seams on top",
+        description="Unwrap with the seams exactly as they are on the mesh "
+                    "(no automatic marking of CAD face boundaries) — keeps "
+                    "merged islands merged",
         default=False,
     )
     merge_fillets: bpy.props.BoolProperty(
@@ -2847,7 +3028,7 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
                     ignore_group_boundaries = True
                     break
 
-        if ignore_group_boundaries:
+        if ignore_group_boundaries and not self.preserve_existing_seams:
             for edge in bm.edges:
                 if len(edge.link_faces) != 2:
                     continue
@@ -2882,15 +3063,20 @@ class AutoUnwrapPlasticityOperator(bpy.types.Operator):
             if group_a is None or group_b is None:
                 continue
             if selected_group_indices is None:
-                if merge_targets[group_a] != merge_targets[group_b]:
+                if (merge_targets[group_a] != merge_targets[group_b]
+                        and not self.preserve_existing_seams):
                     edge.seam = True
             else:
                 selected_a = is_face_selected(face_a)
                 selected_b = is_face_selected(face_b)
                 if selected_a and selected_b:
-                    if not ignore_group_boundaries and merge_targets[group_a] != merge_targets[group_b]:
+                    if (not ignore_group_boundaries
+                            and merge_targets[group_a] != merge_targets[group_b]
+                            and not self.preserve_existing_seams):
                         edge.seam = True
                 elif selected_a or selected_b:
+                    # Selection-boundary seams stay even in preserve mode:
+                    # a partial unwrap needs its island isolated.
                     edge.seam = True
 
         if use_edit_mesh:
@@ -2958,10 +3144,22 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
         precision=4,
         subtype='FACTOR',
     )
-    pack_rotate: bpy.props.BoolProperty(
-        name="Rotate Islands",
-        description="Allow island rotation during packing",
-        default=False,
+    pack_mode: bpy.props.EnumProperty(
+        name="Packing",
+        description="How much freedom the packer has to fill the UV space",
+        items=[
+            ('ALIGNED', "Aligned",
+             "Never rotate islands. Keeps projection-based and world-aligned "
+             "UVs exactly as they are, at the cost of wasted space"),
+            ('CARDINAL', "Cardinal",
+             "Rotate islands in 90 degree steps. Much better coverage while "
+             "tiled material grain stays axis aligned"),
+            ('MAXIMUM', "Maximum Coverage",
+             "Free rotation and tight concave fitting for the densest packing. "
+             "Island orientation becomes arbitrary, so tiled material grain "
+             "runs in mixed directions"),
+        ],
+        default='CARDINAL',
     )
     average_islands: bpy.props.BoolProperty(
         name="Average Islands Scale",
@@ -2971,9 +3169,9 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, "pack_mode")
         layout.prop(self, "average_islands")
         layout.prop(self, "pack_margin")
-        layout.prop(self, "pack_rotate")
 
     @classmethod
     def poll(cls, context):
@@ -2992,6 +3190,15 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
                 return [obj for obj in edit_objects if obj and obj.type == 'MESH']
             return []
         return [obj for obj in context.selected_objects if obj.type == 'MESH']
+
+    def _mode_kwargs(self):
+        if self.pack_mode == 'ALIGNED':
+            return {"rotate": False, "shape_method": 'CONCAVE', "scale": True}
+        if self.pack_mode == 'MAXIMUM':
+            return {"rotate": True, "rotate_method": 'ANY',
+                    "shape_method": 'CONCAVE', "scale": True}
+        return {"rotate": True, "rotate_method": 'CARDINAL',
+                "shape_method": 'CONCAVE', "scale": True}
 
     @staticmethod
     def _snapshot_mesh_selection(bm):
@@ -3039,6 +3246,7 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
         prev_mode = context.mode
         prev_active = context.view_layer.objects.active
         prev_selected = list(context.selected_objects)
+        coverage_before = _uv_coverage_fraction(objects)
 
         packed = False
         try:
@@ -3095,8 +3303,8 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
                         force_uv_sync=False,
                         **_pack_islands_kwargs(
                             margin=self.pack_margin,
-                            rotate=self.pack_rotate,
                             merge_overlap=False,
+                            **self._mode_kwargs(),
                         ),
                     )
                 finally:
@@ -3143,6 +3351,733 @@ class PackUVIslandsPlasticityOperator(bpy.types.Operator):
             self.report({'WARNING'}, "Pack UV Islands cancelled")
             return {'CANCELLED'}
 
+        coverage_after = _uv_coverage_fraction(objects)
+        self.report(
+            {'INFO'},
+            "UV coverage %.0f%% -> %.0f%%" % (
+                coverage_before * 100.0, coverage_after * 100.0),
+        )
+        return {'FINISHED'}
+
+
+def _normal_spread_degrees(normals):
+    if len(normals) < 2:
+        return 0.0
+
+    def farthest(reference):
+        best = reference
+        best_dot = 2.0
+        for normal in normals:
+            dot = normal.dot(reference)
+            if dot < best_dot:
+                best_dot = dot
+                best = normal
+        return best, best_dot
+
+    first, _ = farthest(normals[0])
+    _, worst_dot = farthest(first)
+    return math.degrees(math.acos(max(-1.0, min(1.0, worst_dot))))
+
+
+_AXIS_VECTORS = (
+    mathutils.Vector((1.0, 0.0, 0.0)), mathutils.Vector((-1.0, 0.0, 0.0)),
+    mathutils.Vector((0.0, 1.0, 0.0)), mathutils.Vector((0.0, -1.0, 0.0)),
+    mathutils.Vector((0.0, 0.0, 1.0)), mathutils.Vector((0.0, 0.0, -1.0)),
+)
+
+
+# Box-projection frames, one per axis: tangent runs along U, bitangent
+# along V, and tangent x bitangent points back down the axis so faces on
+# opposite sides mirror correctly.
+_AXIS_FRAMES = (
+    (mathutils.Vector((0.0, 1.0, 0.0)), mathutils.Vector((0.0, 0.0, 1.0))),
+    (mathutils.Vector((0.0, -1.0, 0.0)), mathutils.Vector((0.0, 0.0, 1.0))),
+    (mathutils.Vector((-1.0, 0.0, 0.0)), mathutils.Vector((0.0, 0.0, 1.0))),
+    (mathutils.Vector((1.0, 0.0, 0.0)), mathutils.Vector((0.0, 0.0, 1.0))),
+    (mathutils.Vector((1.0, 0.0, 0.0)), mathutils.Vector((0.0, 1.0, 0.0))),
+    (mathutils.Vector((-1.0, 0.0, 0.0)), mathutils.Vector((0.0, 1.0, 0.0))),
+)
+
+
+def _part_axis_frames(bm):
+    """Six axis frames built from the part's own principal directions, so a
+    CAD body sitting at an angle still gets panel-aligned UVs. Falls back to
+    world axes when the shape has no clear orientation."""
+    try:
+        import numpy as np
+        points = np.array([v.co[:] for v in bm.verts], dtype=np.float64)
+        if len(points) < 4:
+            raise ValueError
+        points = points - points.mean(axis=0)
+        _values, vectors = np.linalg.eigh(points.T @ points)
+        e0 = mathutils.Vector(vectors[:, 2]).normalized()
+        e1 = mathutils.Vector(vectors[:, 1]).normalized()
+        e2 = e0.cross(e1).normalized()
+        e1 = e2.cross(e0).normalized()
+    except Exception:
+        e0 = mathutils.Vector((1.0, 0.0, 0.0))
+        e1 = mathutils.Vector((0.0, 1.0, 0.0))
+        e2 = mathutils.Vector((0.0, 0.0, 1.0))
+    axes = (e0, -e0, e1, -e1, e2, -e2)
+    frames = (
+        (e1, e2), (-e1, e2),
+        (-e0, e2), (e0, e2),
+        (e0, e1), (-e0, e1),
+    )
+    return axes, frames
+
+
+def _dominant_axis_frame(faces, axes=None, frames=None):
+    if axes is not None:
+        average = mathutils.Vector((0.0, 0.0, 0.0))
+        for face in faces:
+            average += face.normal * face.calc_area()
+        if average.length < 1e-12:
+            return None
+        average.normalize()
+        index = max(range(len(axes)), key=lambda i: average.dot(axes[i]))
+        return (axes[index],) + frames[index]
+    return _dominant_axis_frame_world(faces)
+
+
+def _dominant_axis_frame_world(faces):
+    average = mathutils.Vector((0.0, 0.0, 0.0))
+    for face in faces:
+        average += face.normal * face.calc_area()
+    if average.length < 1e-12:
+        return None
+    average.normalize()
+    index = max(range(len(_AXIS_VECTORS)),
+                key=lambda i: average.dot(_AXIS_VECTORS[i]))
+    tangent, bitangent = _AXIS_FRAMES[index]
+    return _AXIS_VECTORS[index], tangent, bitangent
+
+
+def _convex_hull_2d(points):
+    points = sorted(set(points))
+    if len(points) < 3:
+        return points
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for point in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _min_area_rect_angle(points):
+    """Orientation of the tightest bounding rectangle. The optimum always
+    lies along a hull edge, so only those need testing."""
+    hull = _convex_hull_2d(points)
+    if len(hull) < 3:
+        return None
+    best_angle = None
+    best_area = None
+    for i in range(len(hull)):
+        ax, ay = hull[i]
+        bx, by = hull[(i + 1) % len(hull)]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length < 1e-12:
+            continue
+        cos_a, sin_a = dx / length, dy / length
+        min_u = min_v = float('inf')
+        max_u = max_v = float('-inf')
+        for px, py in hull:
+            u = px * cos_a + py * sin_a
+            v = -px * sin_a + py * cos_a
+            min_u = min(min_u, u); max_u = max(max_u, u)
+            min_v = min(min_v, v); max_v = max(max_v, v)
+        area = (max_u - min_u) * (max_v - min_v)
+        if best_area is None or area < best_area:
+            best_area = area
+            best_angle = math.atan2(dy, dx)
+    return best_angle
+
+
+def _island_axis_offset(faces, uv_layer, axes=None, frames=None):
+    """Rotation between the island's UVs and the 3D frame of the axis it
+    faces, as a weighted circular mean."""
+    frame = _dominant_axis_frame(faces, axes, frames)
+    if frame is None:
+        return None
+    _axis, tangent, bitangent = frame
+    sin_sum = 0.0
+    cos_sum = 0.0
+    for face in faces:
+        for loop in face.loops:
+            edge_3d = loop.link_loop_next.vert.co - loop.vert.co
+            edge_uv = loop.link_loop_next[uv_layer].uv - loop[uv_layer].uv
+            if edge_3d.length < 1e-9 or edge_uv.length < 1e-9:
+                continue
+            delta = (math.atan2(edge_uv.y, edge_uv.x)
+                     - math.atan2(edge_3d.dot(bitangent), edge_3d.dot(tangent)))
+            sin_sum += math.sin(delta) * edge_uv.length
+            cos_sum += math.cos(delta) * edge_uv.length
+    if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
+        return None
+    return math.atan2(sin_sum, cos_sum)
+
+
+def _rotate_island(faces, uv_layer, offset):
+    uvs = [loop[uv_layer].uv for face in faces for loop in face.loops]
+    if not uvs:
+        return
+    cos_a = math.cos(offset)
+    sin_a = math.sin(offset)
+    center_x = sum(uv.x for uv in uvs) / len(uvs)
+    center_y = sum(uv.y for uv in uvs) / len(uvs)
+    for uv in uvs:
+        x = uv.x - center_x
+        y = uv.y - center_y
+        uv[:] = (center_x + x * cos_a - y * sin_a,
+                 center_y + x * sin_a + y * cos_a)
+
+
+def _edge_uv_direction(edge, face, uv_layer):
+    """UV vector of an edge, always measured from verts[0] to verts[1] so
+    the two islands sharing it can be compared directly."""
+    for loop in face.loops:
+        if loop.edge != edge:
+            continue
+        start = loop[uv_layer].uv
+        end = loop.link_loop_next[uv_layer].uv
+        return (end - start) if loop.vert == edge.verts[0] else (start - end)
+    return None
+
+
+def _align_islands_to_surface(bm, uv_layer):
+    """Rotate each island so its own panel edges run along U and V, using
+    the tightest bounding rectangle. The rectangle fixes orientation only
+    modulo 90 degrees; the remaining quarter-turn is propagated across
+    seams from the largest island, so a narrow rim strip keeps running the
+    same way as the panel it borders instead of turning sideways."""
+    islands = _uv_islands(bm, uv_layer)
+    if not islands:
+        return 0
+
+    # One global reference derived from the part itself. Chained
+    # propagation drifts and cannot close loops on a closed surface, and
+    # world axes are wrong whenever the body does not sit square.
+    axes, frames = _part_axis_frames(bm)
+    for faces in islands:
+        offset = _island_axis_offset(faces, uv_layer, axes, frames)
+        if offset is not None:
+            _rotate_island(faces, uv_layer, -offset)
+
+    return len(islands)
+
+
+def _align_islands_by_propagation(bm, uv_layer):
+    islands = _uv_islands(bm, uv_layer)
+    if not islands:
+        return 0
+
+    for faces in islands:
+        uvs = [loop[uv_layer].uv for face in faces for loop in face.loops]
+        if len(uvs) < 3:
+            continue
+        angle = _min_area_rect_angle(
+            [(round(uv.x, 7), round(uv.y, 7)) for uv in uvs])
+        if angle is not None:
+            _rotate_island(faces, uv_layer, -angle)
+
+    island_of = {}
+    for index, faces in enumerate(islands):
+        for face in faces:
+            island_of[face.index] = index
+
+    neighbours = {}
+    for edge in bm.edges:
+        if len(edge.link_faces) != 2:
+            continue
+        face_a, face_b = edge.link_faces
+        a = island_of.get(face_a.index)
+        b = island_of.get(face_b.index)
+        if a is None or b is None or a == b:
+            continue
+        neighbours.setdefault(a, []).append((b, edge, face_a, face_b))
+        neighbours.setdefault(b, []).append((a, edge, face_b, face_a))
+
+    order = sorted(range(len(islands)), key=lambda i: -len(islands[i]))
+    visited = set()
+    for seed in order:
+        if seed in visited:
+            continue
+        visited.add(seed)
+        queue = [seed]
+        while queue:
+            current = queue.pop(0)
+            for other, edge, _own_face, other_face in neighbours.get(current, ()):
+                if other in visited:
+                    continue
+                sin_sum = 0.0
+                cos_sum = 0.0
+                for linked, shared, own_face, target_face in neighbours[other]:
+                    if linked != current:
+                        continue
+                    fixed = _edge_uv_direction(shared, target_face, uv_layer)
+                    moving = _edge_uv_direction(shared, own_face, uv_layer)
+                    if fixed is None or moving is None:
+                        continue
+                    if fixed.length < 1e-9 or moving.length < 1e-9:
+                        continue
+                    delta = (math.atan2(fixed.y, fixed.x)
+                             - math.atan2(moving.y, moving.x))
+                    weight = min(fixed.length, moving.length)
+                    sin_sum += math.sin(delta) * weight
+                    cos_sum += math.cos(delta) * weight
+                if abs(sin_sum) > 1e-12 or abs(cos_sum) > 1e-12:
+                    # The exact angle, not a quarter turn: neighbouring CAD
+                    # surfaces meet at arbitrary angles, so snapping to 90
+                    # degrees cannot make the texture run continuously.
+                    _rotate_island(islands[other], uv_layer,
+                                   math.atan2(sin_sum, cos_sum))
+                visited.add(other)
+                queue.append(other)
+    return len(islands)
+
+
+def _align_islands_to_axis(bm, uv_layer):
+    """Rotate each island so its UV axes match the 3D frame of the axis it
+    faces, giving every panel the orientation a box projection would while
+    keeping the solver's low distortion."""
+    aligned = 0
+    for faces in _uv_islands(bm, uv_layer):
+        frame = _dominant_axis_frame(faces)
+        if frame is None:
+            continue
+        _axis, tangent, bitangent = frame
+        sin_sum = 0.0
+        cos_sum = 0.0
+        for face in faces:
+            for loop in face.loops:
+                edge_3d = loop.link_loop_next.vert.co - loop.vert.co
+                edge_uv = (loop.link_loop_next[uv_layer].uv
+                           - loop[uv_layer].uv)
+                if edge_3d.length < 1e-9 or edge_uv.length < 1e-9:
+                    continue
+                delta = (math.atan2(edge_uv.y, edge_uv.x)
+                         - math.atan2(edge_3d.dot(bitangent),
+                                      edge_3d.dot(tangent)))
+                sin_sum += math.sin(delta) * edge_uv.length
+                cos_sum += math.cos(delta) * edge_uv.length
+        if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
+            continue
+        offset = -math.atan2(sin_sum, cos_sum)
+        cos_a = math.cos(offset)
+        sin_a = math.sin(offset)
+        uvs = [loop[uv_layer].uv for face in faces for loop in face.loops]
+        if not uvs:
+            continue
+        center_x = sum(uv.x for uv in uvs) / len(uvs)
+        center_y = sum(uv.y for uv in uvs) / len(uvs)
+        for uv in uvs:
+            x = uv.x - center_x
+            y = uv.y - center_y
+            uv[:] = (center_x + x * cos_a - y * sin_a,
+                     center_y + x * sin_a + y * cos_a)
+        aligned += 1
+    return aligned
+
+
+class AutoUnwrapAxisPlasticityOperator(bpy.types.Operator):
+    bl_idname = "mesh.auto_unwrap_axis_plasticity"
+    bl_label = "Auto Unwrap (Axis)"
+    bl_description = (
+        "Group Plasticity CAD faces into charts by which axis they face, "
+        "seam between the charts, then unwrap and pack. Islands stay panel "
+        "shaped instead of wrapping around the model"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    max_normal_spread: bpy.props.FloatProperty(
+        name="Max Normal Spread",
+        description="A CAD face varying more than this stays its own island",
+        default=math.radians(120.0), min=math.radians(30.0),
+        max=math.radians(180.0), subtype='ANGLE',
+    )
+    clear_existing_seams: bpy.props.BoolProperty(
+        name="Replace Existing Seams",
+        description="Clear current seams before marking the new chart borders",
+        default=True,
+    )
+    align_mode: bpy.props.EnumProperty(
+        name="Align Islands",
+        description="How each island is oriented before packing",
+        items=[
+            ('SURFACE', "To Surface",
+             "Align every island to the part's own principal axes. Panels "
+             "read square even when the body does not sit square to the "
+             "world"),
+            ('FLOW', "Follow Neighbours",
+             "Fit each island to its own panel edges, then carry the "
+             "orientation across seams from the largest island so strips "
+             "keep running with the panel they border"),
+            ('WORLD', "To World Axis",
+             "Orient islands to the axis they face, like a box projection. "
+             "Only reads square when the part is axis aligned"),
+            ('NONE', "Off",
+             "Leave the solver's own orientation and let the packer rotate "
+             "freely for maximum coverage"),
+        ],
+        default='SURFACE',
+    )
+    do_pack: bpy.props.BoolProperty(name="Pack Islands", default=True)
+    pack_mode: bpy.props.EnumProperty(
+        name="Packing",
+        items=[
+            ('ALIGNED', "Aligned", "Never rotate islands"),
+            ('CARDINAL', "Cardinal", "Rotate in 90 degree steps"),
+            ('MAXIMUM', "Maximum Coverage", "Free rotation, densest packing"),
+        ],
+        default='CARDINAL',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode not in {'OBJECT', 'EDIT_MESH'}:
+            return False
+        if context.mode == 'EDIT_MESH':
+            edit_objects = getattr(context, "objects_in_mode", None)
+            return any(obj and obj.type == 'MESH' for obj in edit_objects or [])
+        return any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def _charts_for_mesh(self, obj, bm):
+        mesh = obj.data
+        groups = mesh.get("groups")
+        face_ids = mesh.get("face_ids")
+        if groups is None or face_ids is None:
+            return None, "no Plasticity face data"
+        face_id_by_face = _build_face_id_map(groups, face_ids, mesh)
+        if not face_id_by_face:
+            return None, "face ids unreadable"
+
+        cad = {}
+        for face in bm.faces:
+            if face.index >= len(face_id_by_face):
+                continue
+            face_id = face_id_by_face[face.index]
+            if face_id is None:
+                continue
+            cad.setdefault(face_id, []).append(face)
+        if not cad:
+            return None, "no CAD faces found"
+
+        threshold = math.degrees(self.max_normal_spread)
+        bucket = {}
+        wrapping = set()
+        for face_id, faces in cad.items():
+            normals = [f.normal for f in faces if f.normal.length > 1e-9]
+            if not normals:
+                bucket[face_id] = -1
+                continue
+            if _normal_spread_degrees(normals) > threshold:
+                wrapping.add(face_id)
+                bucket[face_id] = -1
+                continue
+            average = mathutils.Vector((0.0, 0.0, 0.0))
+            for face in faces:
+                average += face.normal * face.calc_area()
+            if average.length < 1e-9:
+                bucket[face_id] = -1
+                continue
+            average.normalize()
+            bucket[face_id] = max(
+                range(len(_AXIS_VECTORS)),
+                key=lambda i: average.dot(_AXIS_VECTORS[i]),
+            )
+
+        parent = {face_id: face_id for face_id in cad}
+
+        def find(key):
+            while parent[key] != key:
+                parent[key] = parent[parent[key]]
+                key = parent[key]
+            return key
+
+        owner = {}
+        for face_id, faces in cad.items():
+            for face in faces:
+                owner[face.index] = face_id
+        shared = {}
+        for edge in bm.edges:
+            if len(edge.link_faces) != 2:
+                continue
+            a = owner.get(edge.link_faces[0].index)
+            b = owner.get(edge.link_faces[1].index)
+            if a is None or b is None or a == b:
+                continue
+            if bucket.get(a, -1) < 0 or bucket.get(a) != bucket.get(b):
+                continue
+            key = (a, b) if a < b else (b, a)
+            shared[key] = shared.get(key, 0) + 1
+
+        for (a, b), _count in sorted(shared.items(), key=lambda kv: -kv[1]):
+            root_a, root_b = find(a), find(b)
+            if root_a == root_b:
+                continue
+            parent[root_a] = root_b
+
+        charts = {}
+        for face_id, faces in cad.items():
+            charts.setdefault(find(face_id), []).extend(faces)
+        return (charts, owner, {fid: find(fid) for fid in cad}, wrapping), None
+
+    def execute(self, context):
+        objects = PackUVIslandsPlasticityOperator._target_objects(context)
+        objects = [o for o in objects if o and o.type == 'MESH' and o.data]
+        if not objects:
+            self.report({'WARNING'}, "No mesh objects selected")
+            return {'CANCELLED'}
+
+        prev_mode = context.mode
+        if prev_mode == 'OBJECT':
+            if context.view_layer.objects.active not in objects:
+                context.view_layer.objects.active = objects[0]
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        chart_total = 0
+        wrapping_total = 0
+        failures = []
+        try:
+            for obj in objects:
+                if obj.mode != 'EDIT':
+                    continue
+                mesh = obj.data
+                bm = bmesh.from_edit_mesh(mesh)
+                bm.faces.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                result, error = self._charts_for_mesh(obj, bm)
+                if result is None:
+                    failures.append("%s: %s" % (obj.name, error))
+                    continue
+                charts, owner, chart_of, wrapping = result
+                chart_total += len(charts)
+                wrapping_total += len(wrapping)
+
+                if self.clear_existing_seams:
+                    for edge in bm.edges:
+                        edge.seam = False
+                for edge in bm.edges:
+                    if len(edge.link_faces) != 2:
+                        edge.seam = True
+                        continue
+                    a = owner.get(edge.link_faces[0].index)
+                    b = owner.get(edge.link_faces[1].index)
+                    if a is None or b is None:
+                        continue
+                    if chart_of.get(a) != chart_of.get(b):
+                        edge.seam = True
+                _touch_seams_version(mesh)
+                bmesh.update_edit_mesh(mesh, loop_triangles=False,
+                                       destructive=False)
+
+            bpy.ops.mesh.select_all(action='SELECT')
+            _relax_run_uv_op(
+                context, bpy.ops.uv.unwrap, method='ANGLE_BASED',
+                margin=0.0, correct_aspect=True,
+            )
+            if self.align_mode != 'NONE':
+                align = {
+                    'SURFACE': _align_islands_to_surface,
+                    'FLOW': _align_islands_by_propagation,
+                }.get(self.align_mode, _align_islands_to_axis)
+                for obj in objects:
+                    if obj.mode != 'EDIT':
+                        continue
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    bm.faces.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    uv_layer = bm.loops.layers.uv.active
+                    if uv_layer is None:
+                        continue
+                    align(bm, uv_layer)
+                    bmesh.update_edit_mesh(obj.data, loop_triangles=False,
+                                           destructive=False)
+            if self.do_pack:
+                mode_kwargs = {
+                    'ALIGNED': {"rotate": False},
+                    'MAXIMUM': {"rotate": True, "rotate_method": 'ANY'},
+                }.get(self.pack_mode,
+                      {"rotate": True, "rotate_method": 'CARDINAL'})
+                if self.align_mode != 'NONE':
+                    mode_kwargs = {"rotate": False}
+                mode_kwargs.update({"shape_method": 'CONCAVE', "scale": True})
+                _relax_run_uv_op(
+                    context, bpy.ops.uv.average_islands_scale,
+                    force_uv_sync=False,
+                )
+                _relax_run_uv_op(
+                    context, bpy.ops.uv.pack_islands, force_uv_sync=False,
+                    **_pack_islands_kwargs(margin=0.003, merge_overlap=False,
+                                           **mode_kwargs)
+                )
+        finally:
+            if prev_mode == 'OBJECT' and context.mode != 'OBJECT':
+                try:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                except Exception:
+                    pass
+
+        if failures:
+            self.report({'WARNING'}, "; ".join(failures))
+            return {'CANCELLED'}
+
+        coverage = _uv_coverage_fraction(objects)
+        note = ""
+        if wrapping_total:
+            note = ", %d wrapping CAD face(s) left alone" % wrapping_total
+        self.report(
+            {'INFO'},
+            "Auto unwrap: %d charts, coverage %.0f%%%s" % (
+                chart_total, coverage * 100.0, note),
+        )
+        return {'FINISHED'}
+
+
+class UVHealthCheckPlasticityOperator(bpy.types.Operator):
+    bl_idname = "mesh.uv_health_check_plasticity"
+    bl_label = "UV Health Check"
+    bl_description = (
+        "Report UV coverage and per-island quality, and select the islands "
+        "that pack badly (wrapping or sprawling ones) so they can be cut"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    max_normal_spread: bpy.props.FloatProperty(
+        name="Max Normal Spread",
+        description=(
+            "An island whose faces vary in direction by more than this wraps "
+            "around the model and cannot pack tightly"
+        ),
+        default=math.radians(120.0), min=math.radians(10.0),
+        max=math.radians(180.0), subtype='ANGLE',
+    )
+    min_fill: bpy.props.FloatProperty(
+        name="Min Fill",
+        description=(
+            "How much of its own bounding box an island must cover. Low fill "
+            "means a snake or ring shape that wastes UV space"
+        ),
+        default=0.35, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    select_problems: bpy.props.BoolProperty(
+        name="Select Problem Islands",
+        description="Select the faces of failing islands in Edit Mode",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode not in {'OBJECT', 'EDIT_MESH'}:
+            return False
+        if context.mode == 'EDIT_MESH':
+            edit_objects = getattr(context, "objects_in_mode", None)
+            return any(obj and obj.type == 'MESH' for obj in edit_objects or [])
+        return any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def execute(self, context):
+        objects = PackUVIslandsPlasticityOperator._target_objects(context)
+        objects = [o for o in objects if o and o.type == 'MESH' and o.data]
+        if not objects:
+            self.report({'WARNING'}, "No mesh objects selected")
+            return {'CANCELLED'}
+
+        was_object_mode = context.mode == 'OBJECT'
+        if was_object_mode and self.select_problems:
+            if context.view_layer.objects.active not in objects:
+                context.view_layer.objects.active = objects[0]
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        total_area = 0.0
+        total_islands = 0
+        problems = []
+        lines = []
+        try:
+            for obj in objects:
+                mesh = obj.data
+                in_edit = obj.mode == 'EDIT'
+                bm = bmesh.from_edit_mesh(mesh) if in_edit else bmesh.new()
+                if not in_edit:
+                    bm.from_mesh(mesh)
+                bm.faces.ensure_lookup_table()
+                uv_layer = bm.loops.layers.uv.active
+                if uv_layer is None:
+                    lines.append("%s: no UV layer" % obj.name)
+                    if not in_edit:
+                        bm.free()
+                    continue
+
+                stats = []
+                for faces in _uv_islands(bm, uv_layer):
+                    entry = _uv_island_stats(faces, uv_layer)
+                    if entry is not None:
+                        stats.append(entry)
+                stats.sort(key=lambda s: -s["bbox"])
+                total_islands += len(stats)
+                total_area += sum(s["area"] for s in stats)
+
+                if in_edit and self.select_problems:
+                    for face in bm.faces:
+                        face.select_set(False)
+
+                threshold = math.degrees(self.max_normal_spread)
+                for entry in stats:
+                    bad = []
+                    if entry["normal_spread"] > threshold:
+                        bad.append("wraps %.0f deg" % entry["normal_spread"])
+                    if entry["fill"] < self.min_fill:
+                        bad.append("fill %.0f%%" % (entry["fill"] * 100.0))
+                    if bad:
+                        problems.append((obj.name, entry, bad))
+                        if in_edit and self.select_problems:
+                            for face in entry["faces"]:
+                                face.select_set(True)
+
+                if in_edit:
+                    bmesh.update_edit_mesh(mesh, loop_triangles=False,
+                                           destructive=False)
+                else:
+                    bm.free()
+        finally:
+            if was_object_mode and self.select_problems and context.mode != 'OBJECT':
+                pass
+
+        print("\n[plasticity] UV health check")
+        print("  coverage %.1f%% across %d islands" % (
+            total_area * 100.0, total_islands))
+        for name, entry, bad in problems:
+            print("  %-16s %5d faces  fill %3.0f%%  spread %3.0f deg  "
+                  "compact %.2f  -> %s" % (
+                      name, len(entry["faces"]), entry["fill"] * 100.0,
+                      entry["normal_spread"], entry["compactness"],
+                      ", ".join(bad)))
+        for line in lines:
+            print("  " + line)
+
+        if problems:
+            self.report(
+                {'WARNING'},
+                "UV coverage %.0f%% | %d of %d islands pack badly%s" % (
+                    total_area * 100.0, len(problems), total_islands,
+                    " (selected)" if self.select_problems else ""),
+            )
+        else:
+            self.report(
+                {'INFO'},
+                "UV coverage %.0f%% | all %d islands healthy" % (
+                    total_area * 100.0, total_islands),
+            )
         return {'FINISHED'}
 
 
@@ -3382,6 +4317,7 @@ def _build_face_id_map(groups, face_ids, mesh):
 
 
 _PLASTICITY_GROUP_CACHE = {}
+_CYLINDER_GROUP_INDEX_CACHE = {}
 
 
 def _get_group_cache_key(mesh):
@@ -3826,7 +4762,8 @@ def ensure_live_refacet_timer():
     global _LIVE_REFACET_TIMER_RUNNING
     global _LIVE_REFACET_LAST_SIGNATURE, _LIVE_REFACET_LAST_APPLIED_SIGNATURE
     global _LIVE_REFACET_LAST_CHANGE_TIME, _LIVE_REFACET_TARGET_SELECTION
-    if _LIVE_REFACET_TIMER_RUNNING:
+    if bpy.app.timers.is_registered(_live_refacet_timer):
+        _LIVE_REFACET_TIMER_RUNNING = True
         return
     _LIVE_REFACET_TIMER_RUNNING = True
     _LIVE_REFACET_LAST_SIGNATURE = None
@@ -4090,6 +5027,18 @@ def _build_refacet_settings_signature(context):
 
 
 def _live_refacet_timer():
+    try:
+        return _live_refacet_timer_step()
+    except Exception as exc:
+        _record_timer_error("live_refacet", exc)
+        scene = getattr(bpy.context, "scene", None)
+        try:
+            return _get_live_refacet_interval(scene) if scene else _LIVE_REFACET_INTERVAL_DEFAULT
+        except Exception:
+            return _LIVE_REFACET_INTERVAL_DEFAULT
+
+
+def _live_refacet_timer_step():
     global _LIVE_REFACET_TIMER_RUNNING
     global _LIVE_REFACET_LAST_SIGNATURE, _LIVE_REFACET_LAST_APPLIED_SIGNATURE
     global _LIVE_REFACET_LAST_CHANGE_TIME, _LIVE_REFACET_TARGET_SELECTION
@@ -4369,6 +5318,7 @@ def reset_live_uv_runtime_state(scene=None, filename=None):
     clear_cache(_LIVE_EXPAND_LAST_MERGE_SETTINGS)
     clear_cache(_LIVE_EXPAND_BASE_SELECTION)
     clear_cache(_LIVE_EXPAND_EXPANDED_SELECTION)
+    clear_cache(_CYLINDER_GROUP_INDEX_CACHE)
 
     _LIVE_EXPAND_PENDING_UNWRAP = False
     _LIVE_EXPAND_LAST_SELECTION_TIME = 0.0
@@ -4392,13 +5342,45 @@ def _get_live_expand_interval(scene):
     return value
 
 
+# Blender unregisters a timer whose function raises, so the registration
+# state is the only trustworthy source of truth: a cached flag alone can
+# strand a dead timer with no way back.
+_TIMER_ERRORS = []
+_TIMER_ERROR_COUNTS = {}
+
+
+def _record_timer_error(name, exc):
+    import traceback
+    key = "%s:%r" % (name, exc)
+    count = _TIMER_ERROR_COUNTS.get(key, 0) + 1
+    _TIMER_ERROR_COUNTS[key] = count
+    _TIMER_ERRORS.append((time.time(), name, repr(exc), count))
+    del _TIMER_ERRORS[:-16]
+    if count <= 3:
+        print("[plasticity] %s timer error #%d: %r" % (name, count, exc))
+        traceback.print_exc()
+
+
 def ensure_live_expand_timer():
     global _LIVE_EXPAND_TIMER_RUNNING
-    if _LIVE_EXPAND_TIMER_RUNNING:
-        return
     _LIVE_EXPAND_TIMER_RUNNING = True
+    if bpy.app.timers.is_registered(_live_expand_timer):
+        return
     interval = _get_live_expand_interval(bpy.context.scene)
     bpy.app.timers.register(_live_expand_timer, first_interval=interval)
+
+
+def heal_live_timers():
+    scene = getattr(bpy.context, "scene", None)
+    if scene is None:
+        return
+    if (getattr(scene, "prop_plasticity_live_expand", False)
+            or getattr(scene, "prop_plasticity_live_expand_auto_merge_seams", False)):
+        if not bpy.app.timers.is_registered(_live_expand_timer):
+            ensure_live_expand_timer()
+    if getattr(scene, "prop_plasticity_live_refacet", False):
+        if not bpy.app.timers.is_registered(_live_refacet_timer):
+            ensure_live_refacet_timer()
 
 
 def stop_live_expand_timer():
@@ -4417,6 +5399,7 @@ def stop_live_expand_timer():
     _LIVE_EXPAND_LAST_MERGE_SETTINGS = {}
     _LIVE_EXPAND_BASE_SELECTION = {}
     _LIVE_EXPAND_EXPANDED_SELECTION = {}
+    _CYLINDER_GROUP_INDEX_CACHE.clear()
     _LIVE_EXPAND_SUSPENDED = False
     _LIVE_EXPAND_PENDING_UNWRAP = False
     _LIVE_EXPAND_LAST_SELECTION_TIME = 0.0
@@ -5004,15 +5987,18 @@ def _axis_from_normals(bm, face_indices):
         n = bm.faces[face_index].normal
         if n.length > 1e-8:
             normals.append(n.normalized())
-    if len(normals) < 3:
+    if len(normals) < 2:
         return None
-    mean = mathutils.Vector((0.0, 0.0, 0.0))
-    for n in normals:
-        mean += n
-    mean /= len(normals)
+    # The common perpendicular is the null direction of the uncentered
+    # normal moment. Area weights avoid bias from uneven tessellation.
+    weights = [bm.faces[i].calc_area() for i in face_indices
+               if 0 <= i < len(bm.faces) and bm.faces[i].normal.length > 1e-8]
+    total_area = sum(weights)
+    if total_area <= 0.0:
+        return None
     cov = [[0.0, 0.0, 0.0] for _ in range(3)]
-    for n in normals:
-        offset = n - mean
+    for n, weight in zip(normals, weights):
+        offset = n * math.sqrt(weight / total_area)
         cov[0][0] += offset.x * offset.x
         cov[0][1] += offset.x * offset.y
         cov[0][2] += offset.x * offset.z
@@ -5025,11 +6011,13 @@ def _axis_from_normals(bm, face_indices):
     eigenvalues, eigenvectors = _jacobi_eigen_3x3(cov)
     if not eigenvectors:
         return None
-    min_idx = 0
-    for idx in range(1, 3):
-        if eigenvalues[idx] < eigenvalues[min_idx]:
-            min_idx = idx
-    axis = eigenvectors[min_idx]
+    order = sorted(range(3), key=lambda i: eigenvalues[i])
+    # Planar patches have two null directions and do not establish an axis.
+    if eigenvalues[order[1]] <= 1e-6:
+        return None
+    if eigenvalues[order[0]] > eigenvalues[order[1]] * 0.1:
+        return None
+    axis = eigenvectors[order[0]]
     if axis.length < 1e-6:
         return None
     return axis.normalized()
@@ -5040,7 +6028,7 @@ def _axis_from_planar_patch(bm, face_indices, planar_cos=0.99):
         return None
     bm.faces.ensure_lookup_table()
     normals = []
-    centers = []
+    vertices = set()
     for face_index in face_indices:
         if face_index >= len(bm.faces):
             continue
@@ -5049,8 +6037,9 @@ def _axis_from_planar_patch(bm, face_indices, planar_cos=0.99):
         if n.length <= 1e-8:
             continue
         normals.append(n.normalized())
-        centers.append(face.calc_center_median())
-    if not normals or not centers:
+        vertices.update(face.verts)
+    centers = [vert.co for vert in vertices]
+    if not normals or len(centers) < 3:
         return None
     mean_n = mathutils.Vector((0.0, 0.0, 0.0))
     for n in normals:
@@ -5084,8 +6073,17 @@ def _axis_from_planar_patch(bm, face_indices, planar_cos=0.99):
     cov[2][0] = cov[0][2]
     cov[2][1] = cov[1][2]
 
+    # Vertices establish a direction even for one ngon. Normalizing the
+    # covariance prevents object units from changing the eigensolver result.
+    trace = sum(cov[i][i] for i in range(3))
+    if trace <= 0.0:
+        return None
+    cov = [[value / trace for value in row] for row in cov]
     eigenvalues, eigenvectors = _jacobi_eigen_3x3(cov)
     if not eigenvectors:
+        return None
+    ordered = sorted(eigenvalues)
+    if ordered[-1] - ordered[-2] <= 1e-6:
         return None
 
     tangent = None
@@ -5229,6 +6227,14 @@ def _score_axis_for_side_faces(bm, face_indices, axis, normal_dot_max):
     return wrap_angle * len(side_faces)
 
 
+_CYLINDER_WRAP_SLACK = math.radians(1.0)
+
+
+def _cylinder_closer(wrap, area, than_wrap, than_area):
+    return (wrap > than_wrap + _CYLINDER_WRAP_SLACK
+            or (wrap >= than_wrap - _CYLINDER_WRAP_SLACK and area > than_area))
+
+
 def _score_axis_for_side_faces_combined(bm, face_indices, axis, normal_dot_max):
     if bm is None or axis is None or not face_indices:
         return None
@@ -5271,7 +6277,7 @@ def _score_axis_for_side_faces_combined(bm, face_indices, axis, normal_dot_max):
         return None
 
     wrap_angle = min(wrap_centers, wrap_normals)
-    return wrap_angle * len(side_faces)
+    return wrap_angle, sum(bm.faces[i].calc_area() for i in side_faces)
 
 
 def _angle_delta(first, second):
@@ -5361,77 +6367,56 @@ def _dijkstra_seam(
     return seam_edges, dist.get(found, 0.0)
 
 
-def _occluded_edge_indices_for_view(
-    obj,
-    edges,
-    scene,
-    view_context,
-    selection_center_world,
-    center_radius=0.3,
-):
-    if obj is None or scene is None or view_context is None:
-        return set()
-    if selection_center_world is None:
-        return set()
-    window, area, region, region_3d = view_context
-    if region is None or region_3d is None:
-        return set()
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    mat = obj.matrix_world
-    occluded = set()
-    epsilon = 1e-4
-    selection_center_screen = view3d_utils.location_3d_to_region_2d(
-        region,
-        region_3d,
-        selection_center_world,
-    )
-    region_center = mathutils.Vector((region.width * 0.5, region.height * 0.5))
-    if selection_center_screen is None:
-        selection_center_screen = region_center
-    view_origin = view3d_utils.region_2d_to_origin_3d(
-        region,
-        region_3d,
-        selection_center_screen,
-    )
-    view_dir = view3d_utils.region_2d_to_vector_3d(
-        region,
-        region_3d,
-        selection_center_screen,
-    )
-    if view_dir.length <= 1e-8:
-        return set()
-    view_dir.normalize()
-    t_center = (selection_center_world - view_origin).dot(view_dir)
-    max_radius = min(region.width, region.height) * float(center_radius)
-    for edge in edges:
-        if not edge.is_valid:
+def _seam_view_in_object(obj, view_context):
+    if obj is None or view_context is None:
+        return None
+    region_3d = view_context[3]
+    if region_3d is None:
+        return None
+    view_inverse = region_3d.view_matrix.inverted()
+    look_world = view_inverse.to_3x3() @ mathutils.Vector((0, 0, -1))
+    to_local = obj.matrix_world.inverted()
+    look = to_local.to_3x3() @ look_world
+    if look.length <= 1e-8:
+        return None
+    look.normalize()
+    eye = to_local @ view_inverse.translation if region_3d.is_perspective else None
+    return eye, look
+
+
+def _cylinder_seam_aim(bm, face_indices, axis, center_mean, x_axis, y_axis, seam_view):
+    if seam_view is None:
+        return None
+    eye, look = seam_view
+    sum_x = sum_y = 0.0
+    for face_index in face_indices:
+        face = bm.faces[face_index]
+        normal = face.normal
+        if normal.length <= 1e-8:
             continue
-        midpoint = (edge.verts[0].co + edge.verts[1].co) * 0.5
-        world_midpoint = mat @ midpoint
-        coord = view3d_utils.location_3d_to_region_2d(region, region_3d, world_midpoint)
-        if coord is None:
+        center = face.calc_center_median()
+        radial = center - center_mean
+        radial -= axis * radial.dot(axis)
+        if radial.length <= 1e-6:
             continue
-        if (coord - selection_center_screen).length > max_radius:
+        angle = math.atan2(radial.dot(y_axis), radial.dot(x_axis))
+        if eye is None:
+            to_eye = -look
+        else:
+            to_eye = eye - center
+            if to_eye.length <= 1e-6:
+                continue
+            to_eye.normalize()
+        facing = normal.dot(to_eye)
+        centred = -look.dot(to_eye)
+        if facing <= 0 or centred <= 0:
             continue
-        t_edge = (world_midpoint - view_origin).dot(view_dir)
-        if t_edge <= t_center + epsilon:
-            continue
-        origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, coord)
-        direction = view3d_utils.region_2d_to_vector_3d(region, region_3d, coord)
-        if direction.length <= 1e-8:
-            continue
-        distance = (world_midpoint - origin).length
-        if distance <= epsilon:
-            continue
-        hit, _, _, _, _, _ = scene.ray_cast(
-            depsgraph,
-            origin,
-            direction,
-            distance=distance - epsilon,
-        )
-        if hit:
-            occluded.add(edge.index)
-    return occluded
+        weight = face.calc_area() * facing * centred ** 8
+        sum_x += weight * math.cos(angle)
+        sum_y += weight * math.sin(angle)
+    if math.hypot(sum_x, sum_y) <= 1e-18:
+        return None
+    return math.atan2(sum_y, sum_x)
 
 
 def _auto_cylinder_seam_on_selection(
@@ -5439,10 +6424,7 @@ def _auto_cylinder_seam_on_selection(
     selected_faces,
     mode='FULL',
     partial_angle=200.0,
-    occluded_only=False,
-    obj=None,
-    scene=None,
-    view_context=None,
+    seam_view=None,
 ):
     if not selected_faces:
         return []
@@ -5488,28 +6470,18 @@ def _auto_cylinder_seam_on_selection(
                 component,
                 mode=mode,
                 partial_angle=partial_angle,
-                occluded_only=occluded_only,
-                obj=obj,
-                scene=scene,
-                view_context=view_context,
+                seam_view=seam_view,
             )
             if changed:
                 changed_all.extend(changed)
         return changed_all
 
     candidate_axes, _ = _candidate_axes_from_faces(bm, selected_set)
-    edges_by_index = {edge.index: edge for edge in bm.edges}
-
-    if occluded_only:
-        if scene is None:
-            scene = bpy.context.scene
-        if view_context is None:
-            view_context = _find_view3d_region(scene)
-        if scene is None or view_context is None or obj is None:
-            return []
+    edges = sorted({edge for i in selected_set for edge in bm.faces[i].edges},
+                   key=lambda edge: edge.index)
 
     boundary_edges = []
-    for edge in bm.edges:
+    for edge in edges:
         if not edge.is_valid:
             continue
         selected_count = 0
@@ -5520,7 +6492,7 @@ def _auto_cylinder_seam_on_selection(
             boundary_edges.append(edge)
 
     internal_edges = []
-    for edge in bm.edges:
+    for edge in edges:
         if not edge.is_valid:
             continue
         if len(edge.link_faces) != 2:
@@ -5530,23 +6502,7 @@ def _auto_cylinder_seam_on_selection(
         internal_edges.append(edge)
     if not internal_edges:
         return []
-
-    occluded_edges = None
-    if occluded_only:
-        selection_center = mathutils.Vector((0.0, 0.0, 0.0))
-        for face_index in selected_set:
-            selection_center += bm.faces[face_index].calc_center_median()
-        selection_center /= len(selected_set)
-        selection_center_world = obj.matrix_world @ selection_center
-        occluded_edges = _occluded_edge_indices_for_view(
-            obj,
-            internal_edges,
-            scene,
-            view_context,
-            selection_center_world,
-        )
-        if not occluded_edges:
-            return []
+    edges_by_index = {edge.index: edge for edge in internal_edges}
 
     def _build_boundary_components(edges):
         if not edges:
@@ -5687,6 +6643,9 @@ def _auto_cylinder_seam_on_selection(
             center_mean += bm.faces[face_index].calc_center_median()
         center_mean /= len(selected_set)
 
+        aim = _cylinder_seam_aim(
+            bm, selected_set, axis, center_mean, x_axis, y_axis, seam_view
+        )
         boundary_components = selection_boundary_components
         if not boundary_edges:
             # Fallback to cap boundaries when selection covers the whole closed mesh.
@@ -5722,8 +6681,6 @@ def _auto_cylinder_seam_on_selection(
         edge_angles = {}
         for edge in internal_edges:
             if not edge.is_valid:
-                continue
-            if occluded_edges is not None and edge.index not in occluded_edges:
                 continue
             v1, v2 = edge.verts
             direction = v2.co - v1.co
@@ -5835,6 +6792,8 @@ def _auto_cylinder_seam_on_selection(
             edge_angles=edge_angles,
             turn_weight=turn_weight,
             meridian_weight=meridian_weight,
+            target_angle=aim,
+            angle_weight=2.0 if aim is not None else 0.0,
         )
         if not seam_edges:
             continue
@@ -5913,6 +6872,8 @@ def _sphere_projection_info(bm, selected_set):
     y_axis = axis.cross(x_axis).normalized()
 
     uv_map = {}
+    disc_raw = {}
+    disc_rho_max = 0.0
     inv_pi = 1.0 / math.pi
     inv_two_pi = 1.0 / (2.0 * math.pi)
     for vert_index in selected_verts:
@@ -5927,6 +6888,30 @@ def _sphere_projection_info(bm, selected_set):
         v = 0.5 - math.asin(max(-1.0, min(1.0, z / r))) * inv_pi
         uv_map[vert_index] = (u, v)
 
+        # Lambert azimuthal equal-area disc, centered on the point opposite
+        # the rim (the axis points center -> rim): rho = sin(theta'/2) with
+        # theta' from -axis. Equal-area on the spherical body; the small
+        # non-spherical blend band near the rim is polished afterwards by
+        # a bounded minimize-stretch pass. Radial remapping can fold UVs
+        # on irregular blend tessellation.
+        cos_tp = max(-1.0, min(1.0, -z / r))
+        rho = math.sin(math.acos(cos_tp) * 0.5)
+        phi_len = math.hypot(x, y)
+        if phi_len > 1e-12:
+            disc_raw[vert_index] = (rho * (x / phi_len), rho * (y / phi_len))
+        else:
+            disc_raw[vert_index] = (0.0, 0.0)
+        if rho > disc_rho_max:
+            disc_rho_max = rho
+
+    uv_map_disc = None
+    if disc_rho_max > 1e-8:
+        scale = 0.5 / disc_rho_max
+        uv_map_disc = {
+            vert_index: (0.5 + dx * scale, 0.5 + dy * scale)
+            for vert_index, (dx, dy) in disc_raw.items()
+        }
+
     return {
         "center": center,
         "axis": axis,
@@ -5934,10 +6919,1018 @@ def _sphere_projection_info(bm, selected_set):
         "y_axis": y_axis,
         "seam_axis": basis.normalized(),
         "uv_map": uv_map,
+        "uv_map_disc": uv_map_disc,
+        "theta_max": 2.0 * math.asin(min(1.0, disc_rho_max)),
         "rim_verts": rim_verts,
         "boundary_edges": boundary_edges,
         "internal_edges": internal_edges,
     }
+
+
+def _apply_disc_uvs(bm, selected_set, uv_layer, info):
+    """Assign disc UVs directly: no pole clamping, no wraparound offsets."""
+    uv_map = info["uv_map_disc"]
+    for face in bm.faces:
+        if face.index not in selected_set:
+            continue
+        for loop in face.loops:
+            uv = uv_map.get(loop.vert.index)
+            if uv is not None:
+                loop[uv_layer].uv = uv
+
+
+def _relax_disc_uv_faces(obj, face_indices):
+    """Run the Relax (SLIM) pass on exactly these freshly disc-projected
+    faces. The equal-area disc has perfect texel density but grows angular
+    distortion on deep spheres (checker squares turn into diamonds); SLIM
+    trades a little area evenness for angles, matching a manual Relax UVs
+    click. Selection and select mode are restored; on any failure the plain
+    disc UVs remain."""
+    def _bail(reason):
+        _SPHERE_POLISH_TRACE.append(
+            (time.time(), len(face_indices or ()), False, reason))
+        del _SPHERE_POLISH_TRACE[:-12]
+        return False
+
+    if bpy.app.version < (4, 3, 0) or not face_indices or obj is None:
+        return _bail("guard: version/empty/obj")
+    context = bpy.context
+    if context.mode != 'EDIT_MESH' or obj.mode != 'EDIT':
+        return _bail("guard: mode=%s obj.mode=%s" % (context.mode, obj.mode))
+    mesh = obj.data
+    try:
+        bm = bmesh.from_edit_mesh(mesh)
+    except Exception as exc:
+        return _bail("guard: bmesh %r" % (exc,))
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    tool_settings = context.tool_settings
+    prev_select_mode = tuple(tool_settings.mesh_select_mode)
+    prev_verts = [v.index for v in bm.verts if v.select]
+    prev_edges = [e.index for e in bm.edges if e.select]
+    prev_faces = [f.index for f in bm.faces if f.select]
+    active_face = bm.faces.active
+    prev_active_face = active_face.index if active_face is not None else None
+    prev_active_obj = context.view_layer.objects.active
+    ok = False
+    try:
+        if prev_select_mode != (False, False, True):
+            tool_settings.mesh_select_mode = (False, False, True)
+        for v in bm.verts:
+            v.select = False
+        for e in bm.edges:
+            e.select = False
+        for f in bm.faces:
+            f.select = False
+        face_count = len(bm.faces)
+        for face_index in face_indices:
+            if 0 <= face_index < face_count:
+                bm.faces[face_index].select_set(True)
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        if context.view_layer.objects.active != obj:
+            context.view_layer.objects.active = obj
+        result = _run_relax_op_for_polish()
+        ok = isinstance(result, set) and 'FINISHED' in result
+        global _SPHERE_POLISH_LAST_ERROR
+        _SPHERE_POLISH_LAST_ERROR = None if ok else "result=%r" % (result,)
+    except Exception as exc:
+        ok = False
+        _SPHERE_POLISH_LAST_ERROR = repr(exc)
+    finally:
+        try:
+            bm = bmesh.from_edit_mesh(mesh)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            for v in bm.verts:
+                v.select = False
+            for e in bm.edges:
+                e.select = False
+            for f in bm.faces:
+                f.select = False
+            for face_index in prev_faces:
+                if face_index < len(bm.faces):
+                    bm.faces[face_index].select_set(True)
+            for edge_index in prev_edges:
+                if edge_index < len(bm.edges):
+                    bm.edges[edge_index].select = True
+            for vert_index in prev_verts:
+                if vert_index < len(bm.verts):
+                    bm.verts[vert_index].select = True
+            if prev_active_face is not None and prev_active_face < len(bm.faces):
+                bm.faces.active = bm.faces[prev_active_face]
+            if tuple(tool_settings.mesh_select_mode) != prev_select_mode:
+                tool_settings.mesh_select_mode = prev_select_mode
+            if (prev_active_obj is not None
+                    and context.view_layer.objects.active != prev_active_obj):
+                context.view_layer.objects.active = prev_active_obj
+            bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        except Exception:
+            pass
+    _SPHERE_POLISH_TRACE.append(
+        (time.time(), len(face_indices), ok, _SPHERE_POLISH_LAST_ERROR))
+    del _SPHERE_POLISH_TRACE[:-12]
+    return ok
+
+
+# A single disc island holds up to roughly a hemisphere; past this depth the
+# sphere is split globe-style into a bottom cap disc plus a label band.
+_SPHERE_DEEP_THETA = math.radians(120.0)
+# Latitude (from the bottom pole) where the cap ends and the band begins.
+_SPHERE_CAP_THETA = math.radians(65.0)
+# Why the last automatic sphere polish did nothing (None = it worked).
+_SPHERE_POLISH_LAST_ERROR = None
+# Rolling trace of recent polish calls: (time, face_count, ok, error).
+_SPHERE_POLISH_TRACE = []
+
+
+def _sphere_trace(count, message):
+    _SPHERE_POLISH_TRACE.append((time.time(), count, True, message))
+    del _SPHERE_POLISH_TRACE[:-40]
+
+
+def _sphere_cap_theta_cut():
+    scene = getattr(bpy.context, "scene", None)
+    try:
+        return math.radians(
+            float(getattr(scene, "prop_plasticity_sphere_cap_size", 65.0)))
+    except Exception:
+        return _SPHERE_CAP_THETA
+
+
+def _run_relax_op_for_polish():
+    """Handlers and timers lack window context; give the Relax operator a
+    real VIEW_3D override so the automatic polish works everywhere the
+    manual button does."""
+    window_manager = bpy.context.window_manager
+    if window_manager:
+        for window in window_manager.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                if area.type != 'VIEW_3D':
+                    continue
+                region = next(
+                    (r for r in area.regions if r.type == 'WINDOW'), None)
+                if region is None:
+                    continue
+                with bpy.context.temp_override(
+                        window=window, screen=screen,
+                        area=area, region=region):
+                    return bpy.ops.mesh.relax_uvs_plasticity()
+    return bpy.ops.mesh.relax_uvs_plasticity()
+
+
+def _apply_band_uvs(bm, band_faces, uv_layer, info,
+                    u0=0.55, u1=1.0, v0=0.02, v1=0.98):
+    """Cylindrical init for the band: continuous azimuth unwrapped by BFS
+    across non-seam edges, so the only UV cut lands exactly on the meridian
+    seam. Returns the written loop count (0 = failed)."""
+    uv_map = info["uv_map"]
+    base_u = {}
+    for face_index in band_faces:
+        for vert in bm.faces[face_index].verts:
+            uv = uv_map.get(vert.index)
+            if uv is not None:
+                base_u[vert.index] = uv[0]
+
+    face_u = {}
+    face_mean = {}
+    visited = set()
+    for seed in band_faces:
+        if seed in visited:
+            continue
+        visited.add(seed)
+        seed_face = bm.faces[seed]
+        us = {}
+        ref = None
+        for vert in seed_face.verts:
+            u = base_u.get(vert.index)
+            if u is None:
+                continue
+            if ref is None:
+                ref = u
+            else:
+                while u - ref > 0.5:
+                    u -= 1.0
+                while ref - u > 0.5:
+                    u += 1.0
+            us[vert.index] = u
+        if not us:
+            continue
+        face_u[seed] = us
+        face_mean[seed] = sum(us.values()) / len(us)
+        stack = [seed]
+        while stack:
+            current = stack.pop()
+            for edge in bm.faces[current].edges:
+                if edge.seam or len(edge.link_faces) != 2:
+                    continue
+                other = edge.link_faces[0]
+                if other.index == current:
+                    other = edge.link_faces[1]
+                other_index = other.index
+                if other_index not in band_faces or other_index in visited:
+                    continue
+                mean = face_mean[current]
+                us = {}
+                for vert in other.verts:
+                    u = base_u.get(vert.index)
+                    if u is None:
+                        continue
+                    us[vert.index] = u + round(mean - u)
+                if not us:
+                    continue
+                visited.add(other_index)
+                face_u[other_index] = us
+                face_mean[other_index] = sum(us.values()) / len(us)
+                stack.append(other_index)
+
+    if not face_u:
+        return 0
+    u_values = [u for us in face_u.values() for u in us.values()]
+    v_values = [uv_map[vert_index][1]
+                for us in face_u.values() for vert_index in us
+                if vert_index in uv_map]
+    u_min, u_max = min(u_values), max(u_values)
+    v_min, v_max = min(v_values), max(v_values)
+    u_span = max(u_max - u_min, 1e-9)
+    v_span = max(v_max - v_min, 1e-9)
+    written = 0
+    for face_index, us in face_u.items():
+        for loop in bm.faces[face_index].loops:
+            u = us.get(loop.vert.index)
+            uv = uv_map.get(loop.vert.index)
+            if u is None or uv is None:
+                continue
+            u_n = (u - u_min) / u_span
+            v_n = (uv[1] - v_min) / v_span
+            loop[uv_layer].uv = (u0 + (u1 - u0) * u_n, v0 + (v1 - v0) * v_n)
+            written += 1
+    return written
+
+
+def _sphere_cut_theta_map(bm, selected_set, info):
+    center = info["center"]
+    axis = info["axis"]
+    theta = {}
+    for face_index in selected_set:
+        for vert in bm.faces[face_index].verts:
+            vert_index = vert.index
+            if vert_index in theta:
+                continue
+            vec = vert.co - center
+            r = vec.length
+            if r <= 1e-8:
+                continue
+            theta[vert_index] = math.acos(
+                max(-1.0, min(1.0, -vec.dot(axis) / r)))
+    return theta
+
+
+def _flood_sphere_cut(bm, selected_set, theta, ring_edges):
+    """Split the region at the ring and validate that it really fences the
+    pole off from the opening. Returns (cap_faces, band_faces) or None."""
+    ring_edge_ids = {edge.index for edge in ring_edges}
+    seed = None
+    seed_theta = None
+    for face_index in selected_set:
+        vals = [theta[v.index] for v in bm.faces[face_index].verts
+                if v.index in theta]
+        if not vals:
+            continue
+        mean = sum(vals) / len(vals)
+        if seed_theta is None or mean < seed_theta:
+            seed_theta = mean
+            seed = face_index
+    if seed is None:
+        return None
+    cap_faces = {seed}
+    stack = [seed]
+    while stack:
+        face = bm.faces[stack.pop()]
+        for edge in face.edges:
+            if edge.index in ring_edge_ids:
+                continue
+            for linked in edge.link_faces:
+                li = linked.index
+                if li in selected_set and li not in cap_faces:
+                    cap_faces.add(li)
+                    stack.append(li)
+    band_faces = set(selected_set) - cap_faces
+    if len(cap_faces) < 2 or len(band_faces) < 2:
+        return None
+    ring_theta_max = max(
+        (theta[vert.index] for edge in ring_edges for vert in edge.verts
+         if vert.index in theta), default=None)
+    if ring_theta_max is None:
+        return None
+    limit = ring_theta_max + 0.15
+    for face_index in cap_faces:
+        for vert in bm.faces[face_index].verts:
+            t = theta.get(vert.index)
+            if t is not None and t > limit:
+                return None
+    # The cap must be a disc (Euler characteristic 1): a donut cap means
+    # the cut only pretended to separate (it leaked around a boundary
+    # slit or wandered diagonally).
+    cap_verts = set()
+    cap_edges = set()
+    for face_index in cap_faces:
+        face = bm.faces[face_index]
+        for vert in face.verts:
+            cap_verts.add(vert.index)
+        for edge in face.edges:
+            cap_edges.add(edge.index)
+    if len(cap_verts) - len(cap_edges) + len(cap_faces) != 1:
+        return None
+    return cap_faces, band_faces
+
+
+def _walk_edge_loop_ring(bm, selected_set, info, theta_cut):
+    """Find a closed edge loop near the target cut height.
+
+    Start at the nearest edge and walk loop-style — never
+    turn onto an edge that shares a face with the one you came in on,
+    prefer the straightest continuation — until the loop closes. Start
+    candidates march outward from the target height (no angular window,
+    so any mesh density works); the first closed loop that actually
+    separates the cap wins. Returns (ring_edges, cap_faces, band_faces)
+    or None."""
+    theta = _sphere_cut_theta_map(bm, selected_set, info)
+    axis = info["axis"]
+    center = info["center"]
+    x_axis = info["x_axis"]
+    y_axis = info["y_axis"]
+
+    def azimuth(vert):
+        vec = vert.co - center
+        return math.atan2(vec.dot(y_axis), vec.dot(x_axis))
+
+    allowed = {}
+    for face_index in selected_set:
+        for edge in bm.faces[face_index].edges:
+            if edge.index in allowed or not edge.is_valid:
+                continue
+            if (len(edge.link_faces) == 2
+                    and all(f.index in selected_set
+                            for f in edge.link_faces)):
+                allowed[edge.index] = edge
+    if not allowed:
+        return None
+
+    vert_edges = {}
+    for edge in allowed.values():
+        for vert in edge.verts:
+            vert_edges.setdefault(vert.index, []).append(edge)
+
+    def edge_theta(edge):
+        vals = [theta[v.index] for v in edge.verts if v.index in theta]
+        return sum(vals) / len(vals) if vals else None
+
+    starts = []
+    for edge in allowed.values():
+        et = edge_theta(edge)
+        if et is None:
+            continue
+        direction = (edge.verts[1].co - edge.verts[0].co)
+        if direction.length <= 1e-9:
+            continue
+        if abs(direction.normalized().dot(axis)) > 0.6:
+            continue  # mostly vertical edge: not a loop-row candidate
+        starts.append((abs(et - theta_cut), edge.index, edge))
+    starts.sort(key=lambda item: (item[0], item[1]))
+
+    def walk(start_edge, origin, first):
+        loop_edges = [start_edge]
+        chain = [origin, first]
+        visited = {origin.index, first.index}
+        prev_vert = origin
+        cur_vert = first
+        cur_edge = start_edge
+        for _ in range(len(allowed) + 4):
+            best = None
+            best_score = None
+            dir_in = (cur_vert.co - prev_vert.co)
+            if dir_in.length <= 1e-9:
+                return None, None
+            dir_in = dir_in.normalized()
+            shared_faces = set(cur_edge.link_faces)
+            for cand in vert_edges.get(cur_vert.index, ()):
+                if cand is cur_edge:
+                    continue
+                if shared_faces & set(cand.link_faces):
+                    continue  # loop rule: skip edges of the same faces
+                other = cand.other_vert(cur_vert)
+                dir_out = other.co - cur_vert.co
+                if dir_out.length <= 1e-9:
+                    continue
+                score = dir_in.dot(dir_out.normalized())
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best = (cand, other)
+            if best is None:
+                return None, None
+            cur_edge, other = best
+            loop_edges.append(cur_edge)
+            if other is origin:
+                chain.append(origin)
+                return loop_edges, chain
+            if other.index in visited:
+                return None, None  # spiral / self-touch
+            visited.add(other.index)
+            chain.append(other)
+            prev_vert = cur_vert
+            cur_vert = other
+        return None, None
+
+    for _, _, edge in starts[:80]:
+        v_a, v_b = edge.verts
+        for origin, first in ((v_a, v_b), (v_b, v_a)):
+            loop, chain = walk(edge, origin, first)
+            if not loop or len(loop) < 6:
+                continue
+            # A latitude ring winds exactly once around the axis; a loop
+            # that closes diagonally or vertically does not.
+            winding = 0.0
+            for i in range(len(chain) - 1):
+                delta = azimuth(chain[i + 1]) - azimuth(chain[i])
+                winding += ((delta + math.pi) % math.tau) - math.pi
+            if abs(winding) < 5.5:
+                continue
+            ring_edges = list(dict.fromkeys(loop))
+            validated = _flood_sphere_cut(bm, selected_set, theta,
+                                          ring_edges)
+            if validated is not None:
+                return ring_edges, validated[0], validated[1]
+    return None
+
+
+def _build_latitude_ring_seam(bm, selected_set, info, theta_cut):
+    """Construct a latitude cut using an edge-loop walk first.
+
+    If no loop closes, use graph searches: an encircling cycle followed
+    by a boundary-to-boundary path for slit regions. Returns (ring_edges,
+    cap_faces, band_faces) or None."""
+    result = _walk_edge_loop_ring(bm, selected_set, info, theta_cut)
+    if result is not None:
+        return result
+    return _search_latitude_cut(bm, selected_set, info, theta_cut)
+
+
+def _search_latitude_cut(bm, selected_set, info, theta_cut):
+    """Taut cut at one target latitude, as the single best closed loop
+    around the axis: block every edge crossing one fixed vertical
+    half-plane, then for each near-latitude candidate crossing edge close
+    the cycle with a shortest latitude-hugging path and keep the cheapest
+    cycle. Falls back to a boundary-to-boundary path when the region does
+    not wrap. Returns (ring_edges, cap_faces, band_faces) or None when the
+    cut cannot be built or fails to separate the pole from the opening."""
+    import heapq
+    center = info["center"]
+    axis = info["axis"]
+    x_axis = info["x_axis"]
+    y_axis = info["y_axis"]
+
+    theta = {}
+    phi = {}
+    for face_index in selected_set:
+        for vert in bm.faces[face_index].verts:
+            vert_index = vert.index
+            if vert_index in theta:
+                continue
+            vec = vert.co - center
+            r = vec.length
+            if r <= 1e-8:
+                continue
+            z = vec.dot(axis)
+            theta[vert_index] = math.acos(max(-1.0, min(1.0, -z / r)))
+            phi[vert_index] = math.atan2(vec.dot(y_axis), vec.dot(x_axis))
+
+    graph = {}
+    for edge in info["internal_edges"]:
+        if not edge.is_valid:
+            continue
+        v1, v2 = edge.verts
+        if v1.index not in theta or v2.index not in theta:
+            continue
+        length = edge.calc_length()
+        graph.setdefault(v1.index, []).append((v2.index, edge, length))
+        graph.setdefault(v2.index, []).append((v1.index, edge, length))
+    if len(graph) < 4:
+        return None
+
+    half_pi = math.pi * 0.5
+
+    def dev(vert_index):
+        return abs(theta[vert_index] - theta_cut)
+
+    def edge_cost(v1, v2, length):
+        # Weight high enough that hugging the target latitude beats the
+        # shorter loops available closer to the pole.
+        return length * (1.0 + 16.0 * ((dev(v1) + dev(v2)) * 0.5) / half_pi)
+
+    # Cut the surface along the vertical half-plane through the vertex
+    # closest to the cut latitude; a valid ring crosses it exactly once.
+    # The plane is epsilon-shifted off the anchor's azimuth so no vertex
+    # sits exactly on it — an on-plane vertex would let paths slip through
+    # the cut for free and close tiny local loops instead of the ring.
+    anchor = min(graph, key=lambda vi: (dev(vi), vi))
+    phi0 = phi[anchor] + 1e-4
+    srel = {
+        vi: ((phi[vi] - phi0 + math.pi) % math.tau) - math.pi
+        for vi in graph
+    }
+
+    crossing_ids = set()
+    candidates = []
+    for edge in info["internal_edges"]:
+        if not edge.is_valid:
+            continue
+        v1, v2 = edge.verts
+        s1 = srel.get(v1.index)
+        s2 = srel.get(v2.index)
+        if s1 is None or s2 is None:
+            continue
+        # Short-arc crossing: the edge spans the cut azimuth, not the
+        # antipodal wrap.
+        if s1 * s2 < 0.0 and abs(s1 - s2) < math.pi:
+            crossing_ids.add(edge.index)
+            candidates.append(edge)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda edge: (dev(edge.verts[0].index) + dev(edge.verts[1].index),
+                          edge.index))
+    candidates = candidates[:8]
+
+    def run(source, window, target=None, block_crossing=True):
+        dist = {source: 0.0}
+        prev = {}
+        heap = [(0.0, source)]
+        while heap:
+            d, vi = heapq.heappop(heap)
+            if d != dist.get(vi):
+                continue
+            if target is not None and vi == target:
+                break
+            for wi, edge, length in graph.get(vi, ()):
+                if block_crossing and edge.index in crossing_ids:
+                    continue
+                if dev(wi) > window and wi != target:
+                    continue
+                nd = d + edge_cost(vi, wi, length)
+                if nd < dist.get(wi, float("inf")):
+                    dist[wi] = nd
+                    prev[wi] = (vi, edge)
+                    heapq.heappush(heap, (nd, wi))
+        return dist, prev
+
+    def reconstruct(prev, source, target):
+        if target not in prev:
+            return None
+        edges = []
+        cursor = target
+        while cursor != source:
+            parent, edge = prev[cursor]
+            edges.append(edge)
+            cursor = parent
+        return edges
+
+    seed = None
+    seed_theta = None
+    for face_index in selected_set:
+        vals = [theta[v.index] for v in bm.faces[face_index].verts
+                if v.index in theta]
+        if not vals:
+            continue
+        mean = sum(vals) / len(vals)
+        if seed_theta is None or mean < seed_theta:
+            seed_theta = mean
+            seed = face_index
+    if seed is None:
+        return None
+
+    def flood_and_validate(ring_edges):
+        # The cut must actually fence the pole off from the opening: a cap
+        # that floods past the cut's own top means it leaked.
+        ring_edge_ids = {edge.index for edge in ring_edges}
+        cap_faces = {seed}
+        stack = [seed]
+        while stack:
+            face = bm.faces[stack.pop()]
+            for edge in face.edges:
+                if edge.index in ring_edge_ids:
+                    continue
+                for linked in edge.link_faces:
+                    li = linked.index
+                    if li in selected_set and li not in cap_faces:
+                        cap_faces.add(li)
+                        stack.append(li)
+        band_faces = set(selected_set) - cap_faces
+        if len(cap_faces) < 2 or len(band_faces) < 2:
+            return None
+        ring_theta_max = max(
+            theta[vert.index]
+            for edge in ring_edges for vert in edge.verts
+            if vert.index in theta
+        )
+        limit = ring_theta_max + 0.15
+        for face_index in cap_faces:
+            for vert in bm.faces[face_index].verts:
+                t = theta.get(vert.index)
+                if t is not None and t > limit:
+                    return None
+        return cap_faces, band_faces
+
+    # Stage 1 — encircling cycle (region wraps around the axis). Latitude
+    # corridor: without it the cheapest encircling cycle sneaks down and
+    # loops around the pole, where circling the axis is nearly free.
+    best_cycle = None
+    best_cost = None
+    for window in (0.35, 0.55, 0.80):
+        for edge in candidates:
+            v1, v2 = edge.verts
+            if dev(v1.index) > window or dev(v2.index) > window:
+                continue
+            _, prev = run(v2.index, window, target=v1.index)
+            path_edges = reconstruct(prev, v2.index, v1.index)
+            if path_edges is None:
+                continue
+            total = (sum(edge_cost(e.verts[0].index, e.verts[1].index,
+                                   e.calc_length()) for e in path_edges)
+                     + edge_cost(v1.index, v2.index, edge.calc_length()))
+            if best_cost is None or total < best_cost:
+                best_cost = total
+                best_cycle = path_edges + [edge]
+        if best_cycle:
+            break
+    if best_cycle:
+        ring_edges = list(dict.fromkeys(best_cycle))
+        validated = flood_and_validate(ring_edges)
+        if validated is not None:
+            return ring_edges, validated[0], validated[1]
+
+    # Stage 2 — the region does not wrap (its boundary has a vertical
+    # slit, so it is a disc): cut boundary-to-boundary instead, still
+    # hugging the latitude.
+    boundary_verts = {
+        vert.index
+        for edge in info["boundary_edges"] if edge.is_valid
+        for vert in edge.verts
+        if vert.index in graph
+    }
+    for window in (0.35, 0.55, 0.80):
+        starts = sorted(
+            (vi for vi in boundary_verts if dev(vi) <= window),
+            key=lambda vi: (dev(vi), vi))[:4]
+        for source in starts:
+            dist, prev = run(source, window, block_crossing=False)
+            targets = sorted(
+                (vi for vi in boundary_verts
+                 if vi != source and vi in prev and dev(vi) <= window),
+                key=lambda vi: dist[vi])
+            for target in targets[:12]:
+                path_edges = reconstruct(prev, source, target)
+                if not path_edges:
+                    continue
+                ring_edges = list(dict.fromkeys(path_edges))
+                validated = flood_and_validate(ring_edges)
+                if validated is not None:
+                    return ring_edges, validated[0], validated[1]
+    return None
+
+
+def _apply_sphere_cap_band(bm, selected_set, uv_layer, info):
+    """Globe-style split for deep open spheres: bottom cap disc + one label
+    band with a meridian seam. Marks the rim, the latitude cut ring, and the
+    band meridian as seams, lays out both islands side by side with matched
+    texel density, and returns the changed seam edge list — or None when the
+    split is not applicable (caller falls back to the single disc)."""
+    if not info.get("boundary_edges") or not info.get("uv_map_disc"):
+        return None
+    uv_map = info["uv_map"]
+    theta_cut = _sphere_cap_theta_cut()
+
+    ring = _build_latitude_ring_seam(bm, selected_set, info, theta_cut)
+    if ring is not None:
+        ring_edges, cap_faces, band_faces = ring
+    else:
+        # Fallback: per-face latitude classification (jagged but robust).
+        v_cut = 1.0 - theta_cut / math.pi
+        cap_faces = set()
+        band_faces = set()
+        for face_index in selected_set:
+            face = bm.faces[face_index]
+            v_vals = [uv_map[vert.index][1] for vert in face.verts
+                      if vert.index in uv_map]
+            if not v_vals:
+                band_faces.add(face_index)
+            elif sum(v_vals) / len(v_vals) >= v_cut:
+                cap_faces.add(face_index)
+            else:
+                band_faces.add(face_index)
+
+        # Absorb enclaves so the split yields exactly one cap island and
+        # one band island.
+        def _components(face_set):
+            remaining = set(face_set)
+            components = []
+            while remaining:
+                seed = remaining.pop()
+                stack = [seed]
+                component = {seed}
+                while stack:
+                    face = bm.faces[stack.pop()]
+                    for edge in face.edges:
+                        for linked in edge.link_faces:
+                            li = linked.index
+                            if li in remaining:
+                                remaining.remove(li)
+                                component.add(li)
+                                stack.append(li)
+                components.append(component)
+            components.sort(key=len, reverse=True)
+            return components
+
+        for source, target in ((cap_faces, band_faces),
+                               (band_faces, cap_faces)):
+            for extra in _components(source)[1:]:
+                source.difference_update(extra)
+                target.update(extra)
+        if len(cap_faces) < 2 or len(band_faces) < 2:
+            return None
+        ring_edges = []
+        for edge in info["internal_edges"]:
+            if not edge.is_valid:
+                continue
+            in_cap = [face.index in cap_faces for face in edge.link_faces]
+            if in_cap[0] != in_cap[1]:
+                ring_edges.append(edge)
+
+    changed = []
+    for edge in info["boundary_edges"]:
+        if edge.is_valid and not edge.seam:
+            edge.seam = True
+            changed.append(edge.index)
+    cut_ring_verts = set()
+    for edge in ring_edges:
+        if not edge.is_valid:
+            continue
+        cut_ring_verts.update(vert.index for vert in edge.verts)
+        if not edge.seam:
+            edge.seam = True
+            changed.append(edge.index)
+
+    band_internal = [
+        edge for edge in info["internal_edges"]
+        if edge.is_valid
+        and all(face.index in band_faces for face in edge.link_faces)
+    ]
+    # Only the band's own rim: with mixed boundary rings (e.g. a vase foot
+    # hole) the full region rim skews the meridian endpoints and the path
+    # truncates to a stub near the opening.
+    band_rim = set()
+    for edge in info["boundary_edges"]:
+        if not edge.is_valid:
+            continue
+        if any(face.index in band_faces for face in edge.link_faces):
+            band_rim.update(vert.index for vert in edge.verts)
+    band_info = {
+        "center": info["center"],
+        "axis": info["axis"],
+        "x_axis": info["x_axis"],
+        "y_axis": info["y_axis"],
+        "rim_verts": band_rim,
+        "internal_edges": band_internal,
+    }
+    meridian = _build_sphere_meridian_seam(
+        bm, band_faces, band_info, end_verts=cut_ring_verts)
+    if not meridian:
+        for edge_index in changed:
+            edge = bm.edges[edge_index]
+            if edge.is_valid:
+                edge.seam = False
+        return None
+    for edge in meridian:
+        if edge.is_valid and not edge.seam:
+            edge.seam = True
+            changed.append(edge.index)
+
+    # A meridian tail running alongside the cut ring can pinch off a small
+    # pocket as a third island. Rejoin each pocket with the main band by
+    # unmarking our own seams between them, or hand it to the cap when it
+    # only borders the cap.
+    changed_set = set(changed)
+
+    def _seam_components(face_set):
+        remaining = set(face_set)
+        components = []
+        while remaining:
+            seed = remaining.pop()
+            stack = [seed]
+            component = {seed}
+            while stack:
+                face = bm.faces[stack.pop()]
+                for edge in face.edges:
+                    if edge.seam:
+                        continue
+                    for linked in edge.link_faces:
+                        li = linked.index
+                        if li in remaining:
+                            remaining.remove(li)
+                            component.add(li)
+                            stack.append(li)
+            components.append(component)
+        components.sort(key=len, reverse=True)
+        return components
+
+    band_components = _seam_components(band_faces)
+    for pocket in band_components[1:]:
+        main = band_components[0]
+        rejoined = False
+        for face_index in pocket:
+            for edge in bm.faces[face_index].edges:
+                if (not edge.seam or edge.index not in changed_set
+                        or len(edge.link_faces) != 2):
+                    continue
+                other = edge.link_faces[0]
+                if other.index == face_index:
+                    other = edge.link_faces[1]
+                if other.index in main:
+                    edge.seam = False
+                    changed_set.discard(edge.index)
+                    changed.remove(edge.index)
+                    rejoined = True
+        if rejoined:
+            main.update(pocket)
+            continue
+        band_faces.difference_update(pocket)
+        cap_faces.update(pocket)
+        for face_index in pocket:
+            for edge in bm.faces[face_index].edges:
+                if (not edge.seam or edge.index not in changed_set
+                        or len(edge.link_faces) != 2):
+                    continue
+                other = edge.link_faces[0]
+                if other.index == face_index:
+                    other = edge.link_faces[1]
+                if other.index in cap_faces and other.index not in pocket:
+                    edge.seam = False
+                    changed_set.discard(edge.index)
+                    changed.remove(edge.index)
+
+    # Cap disc, rescaled to fill its own circle, in the left slot.
+    disc_map = info["uv_map_disc"]
+    cap_rho = 0.0
+    for face_index in cap_faces:
+        for vert in bm.faces[face_index].verts:
+            uv = disc_map.get(vert.index)
+            if uv is not None:
+                cap_rho = max(cap_rho,
+                              math.hypot(uv[0] - 0.5, uv[1] - 0.5))
+    if cap_rho <= 1e-9:
+        cap_rho = 0.5
+    cap_scale = 0.5 / cap_rho
+    for face_index in cap_faces:
+        for loop in bm.faces[face_index].loops:
+            uv = disc_map.get(loop.vert.index)
+            if uv is None:
+                continue
+            du = (uv[0] - 0.5) * cap_scale
+            dv = (uv[1] - 0.5) * cap_scale
+            loop[uv_layer].uv = (0.25 + du * 0.5, 0.5 + dv * 0.5)
+
+    if not _apply_band_uvs(bm, band_faces, uv_layer, info):
+        for edge_index in changed:
+            edge = bm.edges[edge_index]
+            if edge.is_valid:
+                edge.seam = False
+        return None
+
+    # Match band texel density to the cap's, growing from the band slot's
+    # left edge so the islands never overlap.
+    def _density(face_set):
+        area_3d = 0.0
+        area_uv = 0.0
+        for face_index in face_set:
+            face = bm.faces[face_index]
+            area_3d += face.calc_area()
+            loops = face.loops
+            for i in range(1, len(loops) - 1):
+                a = loops[0][uv_layer].uv
+                b = loops[i][uv_layer].uv
+                c = loops[i + 1][uv_layer].uv
+                area_uv += abs((b.x - a.x) * (c.y - a.y)
+                               - (c.x - a.x) * (b.y - a.y)) * 0.5
+        return area_3d, area_uv
+
+    cap_3d, cap_uv = _density(cap_faces)
+    band_3d, band_uv = _density(band_faces)
+    if cap_3d > 1e-12 and band_3d > 1e-12 and cap_uv > 1e-12 and band_uv > 1e-12:
+        scale = math.sqrt((cap_uv / cap_3d) / (band_uv / band_3d))
+        for face_index in band_faces:
+            for loop in bm.faces[face_index].loops:
+                uv = loop[uv_layer].uv
+                uv[:] = (0.55 + (uv.x - 0.55) * scale,
+                         0.5 + (uv.y - 0.5) * scale)
+    return {
+        "changed": changed,
+        "cap_faces": cap_faces,
+        "band_faces": band_faces,
+    }
+
+
+def _equalize_cap_band_density(bm, cap_faces, band_faces):
+    """After the SLIM polish (which rescales each island around its own
+    anchors), bring every resulting island back to one shared texel
+    density and lay them out side by side. Works per seam-bounded island,
+    not per cap/band label, so an extra island (second meridian, pocket
+    leftover) cannot keep a mismatched checker size."""
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer is None:
+        return False
+    bm.faces.ensure_lookup_table()
+    all_faces = set(cap_faces) | set(band_faces)
+
+    remaining = set(all_faces)
+    islands = []
+    while remaining:
+        seed = remaining.pop()
+        stack = [seed]
+        island = {seed}
+        while stack:
+            face = bm.faces[stack.pop()]
+            for edge in face.edges:
+                if edge.seam:
+                    continue
+                for linked in edge.link_faces:
+                    li = linked.index
+                    if li in remaining:
+                        remaining.remove(li)
+                        island.add(li)
+                        stack.append(li)
+        islands.append(island)
+
+    def _stats(face_set):
+        area_3d = 0.0
+        area_uv = 0.0
+        u_min = v_min = float('inf')
+        u_max = v_max = float('-inf')
+        for face_index in face_set:
+            face = bm.faces[face_index]
+            area_3d += face.calc_area()
+            loops = face.loops
+            for i in range(1, len(loops) - 1):
+                a = loops[0][uv_layer].uv
+                b = loops[i][uv_layer].uv
+                c = loops[i + 1][uv_layer].uv
+                area_uv += abs((b.x - a.x) * (c.y - a.y)
+                               - (c.x - a.x) * (b.y - a.y)) * 0.5
+            for loop in loops:
+                uv = loop[uv_layer].uv
+                u_min = min(u_min, uv.x)
+                u_max = max(u_max, uv.x)
+                v_min = min(v_min, uv.y)
+                v_max = max(v_max, uv.y)
+        return area_3d, area_uv, (u_min, v_min, u_max, v_max)
+
+    stats = []
+    total_3d = 0.0
+    total_uv = 0.0
+    for island in islands:
+        area_3d, area_uv, bb = _stats(island)
+        if area_3d <= 1e-12 or area_uv <= 1e-12:
+            return False
+        stats.append((island, area_3d, area_uv, bb))
+        total_3d += area_3d
+        total_uv += area_uv
+    if total_3d <= 1e-12 or total_uv <= 1e-12:
+        return False
+    target = total_uv / total_3d
+
+    placed = []
+    cursor = None
+    for island, area_3d, area_uv, bb in sorted(
+            stats, key=lambda item: item[3][0]):
+        s = math.sqrt(target / (area_uv / area_3d))
+        cx = (bb[0] + bb[2]) * 0.5
+        cy = (bb[1] + bb[3]) * 0.5
+        half_w = (bb[2] - bb[0]) * 0.5 * s
+        new_left = cx - half_w
+        shift = 0.0
+        if cursor is not None and new_left < cursor + 0.02:
+            shift = (cursor + 0.02) - new_left
+        for face_index in island:
+            for loop in bm.faces[face_index].loops:
+                uv = loop[uv_layer].uv
+                uv[:] = (cx + (uv.x - cx) * s + shift,
+                         cy + (uv.y - cy) * s)
+        cursor = cx + half_w + shift
+        placed.append(island)
+    return True
 
 
 def _apply_sphere_uvs(bm, selected_set, uv_layer, uv_map, pole_threshold=0.03):
@@ -6168,6 +8161,7 @@ def _build_sphere_meridian_seam(
     info,
     preferred_angle=None,
     blocked_edge_indices=None,
+    end_verts=None,
 ):
     selected_verts = {
         vert.index
@@ -6213,7 +8207,17 @@ def _build_sphere_meridian_seam(
         tol = 1e-6
 
     rim_verts = info["rim_verts"]
-    if rim_verts:
+    if end_verts is not None:
+        # Explicit far endpoints (e.g. the cap/band cut ring): the path must
+        # terminate exactly there, never skim along rows beside it.
+        end_candidates = {v for v in end_verts if v in projections}
+        if rim_verts:
+            start_candidates = {v for v in rim_verts if v in angles}
+        else:
+            start_candidates = {
+                v for v in selected_verts if projections[v] >= max_proj - tol
+            }
+    elif rim_verts:
         rim_proj_vals = [projections[v] for v in rim_verts if v in projections]
         if rim_proj_vals:
             rim_proj = sum(rim_proj_vals) / len(rim_proj_vals)
@@ -6333,6 +8337,7 @@ def _auto_sphere_seam_on_selection(
     bm,
     selected_faces,
     mode='SPHERE',
+    obj=None,
 ):
     if not selected_faces:
         return [], False
@@ -6378,6 +8383,7 @@ def _auto_sphere_seam_on_selection(
                 bm,
                 component,
                 mode=mode,
+                obj=obj,
             )
             if changed_component:
                 changed_all.extend(changed_component)
@@ -6386,11 +8392,58 @@ def _auto_sphere_seam_on_selection(
 
     info = _sphere_projection_info(bm, selected_set)
     if info is None:
+        _sphere_trace(len(selected_set), "creatorA: sphere fit FAILED")
         return [], False
 
     uv_layer = bm.loops.layers.uv.active
     if uv_layer is None:
         uv_layer = bm.loops.layers.uv.verify()
+
+    _sphere_trace(len(selected_set),
+                  "creatorA: mode=%s theta_max=%.0f obj=%s" % (
+                      mode, math.degrees(info.get("theta_max", 0.0)),
+                      "yes" if obj is not None else "NO"))
+    if mode in ('SPHERE_CAP', 'SPHERE_OPEN') and info.get("uv_map_disc"):
+        # Deep open spheres (beyond ~a hemisphere) cannot live in a single
+        # disc island: split globe-style into cap disc + label band, then
+        # polish both islands with the Relax (SLIM) pass.
+        if info.get("theta_max", 0.0) > _SPHERE_DEEP_THETA:
+            split = _apply_sphere_cap_band(bm, selected_set, uv_layer, info)
+            _sphere_trace(len(selected_set),
+                          "creatorA deep: split=%s" % (
+                              "ok" if split is not None else "None"))
+            if split is not None:
+                if _relax_disc_uv_faces(obj, selected_set):
+                    _equalize_cap_band_density(
+                        bm, split["cap_faces"], split["band_faces"])
+                return split["changed"], True
+        # Shallow cap (or split fallback): equal-area disc as the base
+        # layout (no solver init, no meridian), then the Relax (SLIM) pass
+        # so the disc's angular distortion does not survive. Seams first:
+        # the open rim is the island border; a closed cap gets its rim ring
+        # seamed so the disc separates.
+        _apply_disc_uvs(bm, selected_set, uv_layer, info)
+        changed = []
+        if info["boundary_edges"]:
+            for edge in info["boundary_edges"]:
+                if edge.is_valid and not edge.seam:
+                    edge.seam = True
+                    changed.append(edge.index)
+        else:
+            ring_threshold = 0.08
+            for edge in info["internal_edges"]:
+                if not edge.is_valid:
+                    continue
+                v1 = info["uv_map"].get(edge.verts[0].index)
+                v2 = info["uv_map"].get(edge.verts[1].index)
+                if not v1 or not v2:
+                    continue
+                if v1[1] <= ring_threshold and v2[1] <= ring_threshold:
+                    if not edge.seam:
+                        edge.seam = True
+                        changed.append(edge.index)
+        _relax_disc_uv_faces(obj, selected_set)
+        return changed, True
 
     face_offsets = _apply_sphere_uvs(bm, selected_set, uv_layer, info["uv_map"])
 
@@ -6539,16 +8592,108 @@ def _flush_pending_unwrap(context):
     return False
 
 
+def _uv_edge_continuous(uv_layer, face_a, face_b, edge):
+    """True when the two faces share identical UVs along the given edge."""
+    for vert in edge.verts:
+        uv_a = uv_b = None
+        for loop in face_a.loops:
+            if loop.vert == vert:
+                uv_a = loop[uv_layer].uv
+                break
+        for loop in face_b.loops:
+            if loop.vert == vert:
+                uv_b = loop[uv_layer].uv
+                break
+        if uv_a is None or uv_b is None:
+            return False
+        if (abs(uv_a.x - uv_b.x) > 1e-6) or (abs(uv_a.y - uv_b.y) > 1e-6):
+            return False
+    return True
+
+
+def _flip_mirrored_selected_uvs(context):
+    """Un-mirror islands after a live Box Project.
+
+    Blender's Cube Projection maps faces pointing along negative axes with
+    mirrored UVs (textures read backwards). Flip every projected island
+    whose UV winding is inverted relative to its 3D winding, around its
+    own bounds, so orientation and world alignment survive.
+    """
+    obj = context.edit_object or context.active_object
+    if obj is None or obj.type != 'MESH' or obj.mode != 'EDIT':
+        return
+    bm = bmesh.from_edit_mesh(obj.data)
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer is None:
+        return
+    bm.faces.ensure_lookup_table()
+    selected = [face for face in bm.faces if face.select and not face.hide]
+    if not selected:
+        return
+    selected_indices = {face.index for face in selected}
+
+    visited = set()
+    changed = False
+    for seed in selected:
+        if seed.index in visited:
+            continue
+        island = []
+        stack = [seed]
+        visited.add(seed.index)
+        while stack:
+            face = stack.pop()
+            island.append(face)
+            for loop in face.loops:
+                for other in loop.edge.link_faces:
+                    if (other.index in visited
+                            or other.index not in selected_indices):
+                        continue
+                    if _uv_edge_continuous(uv_layer, face, other, loop.edge):
+                        visited.add(other.index)
+                        stack.append(other)
+
+        signed_area = 0.0
+        for face in island:
+            uvs = [loop[uv_layer].uv for loop in face.loops]
+            for i in range(1, len(uvs) - 1):
+                signed_area += (
+                    (uvs[i].x - uvs[0].x) * (uvs[i + 1].y - uvs[0].y)
+                    - (uvs[i + 1].x - uvs[0].x) * (uvs[i].y - uvs[0].y))
+        if signed_area >= 0.0:
+            continue
+
+        xs = [loop[uv_layer].uv.x for face in island for loop in face.loops]
+        mirror_sum = min(xs) + max(xs)
+        for face in island:
+            for loop in face.loops:
+                loop[uv_layer].uv.x = mirror_sum - loop[uv_layer].uv.x
+        changed = True
+
+    if changed:
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False,
+                               destructive=False)
+
+
 def _maybe_live_unwrap(context, force=False, unwrap_kwargs_override=None):
     global _LIVE_EXPAND_LAST_UNWRAP_TIME, _LIVE_EXPAND_PENDING_UNWRAP
     scene = context.scene if context else None
     tool_settings = scene.tool_settings if scene else None
     if not tool_settings:
         return False
-    uv_live = _is_uv_editor_live_unwrap_enabled(context)
-    edge_live = bool(getattr(tool_settings, "use_edge_path_live_unwrap", False))
-    if not uv_live and not edge_live:
-        return False
+    live_mode = _live_update_mode(scene)
+    if live_mode == 'OFF':
+        # Seams-only workflow (e.g. projection-based UVs that must not be
+        # re-solved): merges never touch UVs.
+        _LIVE_EXPAND_PENDING_UNWRAP = False
+        return True
+    if live_mode == 'UNWRAP':
+        # The dropdown alone makes solver mode live; Blender's edge-path
+        # toggle only selects the native fast path when it happens to be on.
+        edge_live = bool(getattr(tool_settings, "use_edge_path_live_unwrap", False))
+    else:
+        # BOX mode is the add-on's own live update; Blender's Live Unwrap
+        # toggles do not gate it (and must not run their solver on top).
+        edge_live = False
     if not context or context.mode != 'EDIT_MESH':
         return False
     window_manager = bpy.context.window_manager
@@ -6566,8 +8711,22 @@ def _maybe_live_unwrap(context, force=False, unwrap_kwargs_override=None):
     _LIVE_EXPAND_LAST_UNWRAP_TIME = now
 
     sphere_projected = False
-    if seam_mode in ('SPHERE', 'SPHERE_CAP', 'SPHERE_OPEN'):
+    if (seam_mode in ('SPHERE', 'SPHERE_CAP', 'SPHERE_OPEN')
+            and live_mode != 'BOX'):
         sphere_projected = _sphere_project_selected_uvs(context)
+        if sphere_projected and seam_mode in ('SPHERE_CAP', 'SPHERE_OPEN'):
+            # The equal-area disc projection IS the result — running the
+            # solver on top would destroy its uniform texel density.
+            _LIVE_EXPAND_PENDING_UNWRAP = False
+            if window_manager:
+                for window in window_manager.windows:
+                    screen = window.screen
+                    if screen is None:
+                        continue
+                    for area in screen.areas:
+                        if area.type in {"VIEW_3D", "IMAGE_EDITOR"}:
+                            area.tag_redraw()
+            return True
 
     candidates = []
     if window_manager:
@@ -6622,8 +8781,19 @@ def _maybe_live_unwrap(context, force=False, unwrap_kwargs_override=None):
         # MINIMUM_STRETCH settings and produce aggressive distortion.
         unwrap_kwargs = _unwrap_kwargs_without_min_stretch(unwrap_kwargs)
 
+    box_size = float(getattr(scene, "prop_plasticity_live_box_project_size", 1.0))
+
     def run_unwrap_with_override(override_ctx):
         with bpy.context.temp_override(**override_ctx):
+            if live_mode == 'BOX':
+                # Instant, world-stable re-projection of the affected
+                # region: keeps projection-based UVs grid-aligned through
+                # merges instead of re-solving them.
+                return bpy.ops.uv.cube_project(
+                    cube_size=box_size,
+                    correct_aspect=True,
+                    scale_to_bounds=False,
+                )
             return bpy.ops.uv.unwrap(**unwrap_kwargs)
 
     def unwrap_cancelled(result):
@@ -6656,7 +8826,20 @@ def _maybe_live_unwrap(context, force=False, unwrap_kwargs_override=None):
                         _restore_space_mode(temp_space, prev_ui_mode, prev_mode)
                         area.type = original_type
         else:
-            result = bpy.ops.uv.unwrap(**unwrap_kwargs)
+            if live_mode == 'BOX':
+                result = bpy.ops.uv.cube_project(
+                    cube_size=box_size,
+                    correct_aspect=True,
+                    scale_to_bounds=False,
+                )
+            else:
+                result = bpy.ops.uv.unwrap(**unwrap_kwargs)
+
+        if live_mode == 'BOX' and not unwrap_cancelled(result):
+            try:
+                _flip_mirrored_selected_uvs(context)
+            except Exception:
+                pass
 
         if unwrap_cancelled(result):
             if sphere_projected:
@@ -6755,19 +8938,53 @@ def _sphere_project_selected_uvs(context):
                 components.append(component)
             return components
 
+        seam_mode = str(getattr(context.scene, "prop_plasticity_auto_seam_mode", "OFF"))
         any_component_updated = False
+        seam_edges_changed = False
+        disc_faces = set()
+        deep_splits = []
         for component in _selected_face_components(selected_set):
             if len(component) < 2:
                 continue
             info = _sphere_projection_info(bm, component)
             if info is None:
+                _sphere_trace(len(component), "liveB: sphere fit FAILED")
                 continue
-            _apply_sphere_uvs(bm, component, uv_layer, info["uv_map"])
+            _sphere_trace(len(component),
+                          "liveB: mode=%s theta_max=%.0f" % (
+                              seam_mode,
+                              math.degrees(info.get("theta_max", 0.0))))
+            if (seam_mode in ('SPHERE_CAP', 'SPHERE_OPEN')
+                    and info.get("uv_map_disc")):
+                split = None
+                if info.get("theta_max", 0.0) > _SPHERE_DEEP_THETA:
+                    split = _apply_sphere_cap_band(
+                        bm, component, uv_layer, info)
+                    _sphere_trace(len(component),
+                                  "liveB deep: split=%s" % (
+                                      "ok" if split is not None else "None"))
+                if split is None:
+                    _apply_disc_uvs(bm, component, uv_layer, info)
+                else:
+                    if split["changed"]:
+                        seam_edges_changed = True
+                    deep_splits.append(split)
+                disc_faces.update(component)
+            else:
+                _apply_sphere_uvs(bm, component, uv_layer, info["uv_map"])
             any_component_updated = True
 
         if any_component_updated:
+            if seam_edges_changed:
+                _touch_seams_version(obj.data)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+            if disc_faces:
+                if _relax_disc_uv_faces(obj, disc_faces):
+                    for split in deep_splits:
+                        _equalize_cap_band_density(
+                            bm, split["cap_faces"], split["band_faces"])
             updated = True
+
     return updated
 
 
@@ -6945,6 +9162,12 @@ def _fallback_live_unwrap_after_seam_change(
         return _maybe_live_unwrap(context, force=True)
     obj = context.active_object
     if obj is None or obj.type != 'MESH':
+        return _maybe_live_unwrap(context, force=True)
+    fallback_scene = getattr(context, "scene", None)
+    if str(getattr(fallback_scene, "prop_plasticity_auto_seam_mode",
+                   "OFF")) in ('SPHERE_CAP', 'SPHERE_OPEN'):
+        # Sphere cap/opening owns its UVs; go straight to the protected
+        # sphere live path (re-project + polish, no solver).
         return _maybe_live_unwrap(context, force=True)
 
     mesh = obj.data
@@ -7196,8 +9419,21 @@ def _touch_live_unwrap_after_seam_change(
 
     scene = getattr(context, "scene", None)
     tool_settings = scene.tool_settings if scene else None
+    if _live_update_mode(scene) != 'UNWRAP':
+        # Box/Off: this whole function is solver machinery (up to and
+        # including the deliberate mesh.mark_seam call that makes
+        # Blender's NATIVE live unwrap re-solve). The fallback path owns
+        # the update instead (box projection, or nothing).
+        return False
+    if str(getattr(scene, "prop_plasticity_auto_seam_mode", "OFF")) in (
+            'SPHERE_CAP', 'SPHERE_OPEN'):
+        # Sphere cap/opening owns its UVs end to end (projection + SLIM
+        # polish); any solver pass here would overwrite the polished
+        # islands. The fallback routes to the protected sphere path.
+        return False
     edge_live = bool(getattr(tool_settings, "use_edge_path_live_unwrap", False)) if tool_settings else False
-    live_enabled = edge_live or _is_uv_editor_live_unwrap_enabled(context)
+    # UNWRAP mode is live on its own; the raw toggles only pick the path.
+    live_enabled = True
     seam_mode = str(getattr(scene, "prop_plasticity_auto_seam_mode", "OFF")) if scene else "OFF"
     edit_objects = _runtime_edit_mesh_objects(
         context,
@@ -7440,6 +9676,18 @@ def _touch_live_unwrap_after_seam_change(
 
 
 def _live_expand_timer():
+    try:
+        return _live_expand_timer_step()
+    except Exception as exc:
+        _record_timer_error("live_expand", exc)
+        scene = getattr(bpy.context, "scene", None)
+        try:
+            return _get_live_expand_interval(scene) if scene else _LIVE_EXPAND_INTERVAL
+        except Exception:
+            return _LIVE_EXPAND_INTERVAL
+
+
+def _live_expand_timer_step():
     global _LIVE_EXPAND_TIMER_RUNNING
     global _LIVE_EXPAND_LAST_SETTINGS, _LIVE_EXPAND_LAST_MERGE_SETTINGS
     global _LIVE_EXPAND_BASE_SELECTION, _LIVE_EXPAND_EXPANDED_SELECTION
@@ -7505,12 +9753,9 @@ def _live_expand_timer():
     auto_select_cylinders_signature = bool(
         getattr(scene, "prop_plasticity_live_expand_auto_select_cylinders", False)
     )
-    if auto_select_cylinders_signature:
-        min_wrap_angle_signature = 120.0
-    else:
-        min_wrap_angle_signature = float(
-            getattr(scene, "prop_plasticity_live_expand_cylinder_min_wrap_angle", 120.0)
-        )
+    min_wrap_angle_signature = float(
+        getattr(scene, "prop_plasticity_live_expand_cylinder_min_wrap_angle", 120.0)
+    )
 
     settings_signature = (
         bool(scene.prop_plasticity_select_adjacent_fillets),
@@ -7522,7 +9767,7 @@ def _live_expand_timer():
         auto_select_cylinders_signature,
         min_wrap_angle_signature,
     )
-    occluded_only = bool(getattr(scene, "prop_plasticity_auto_cylinder_seam_occluded_only", False))
+    seam_facing = bool(getattr(scene, "prop_plasticity_auto_cylinder_seam_facing", False))
     merge_enabled = (
         bool(scene.prop_plasticity_live_expand_auto_merge_seams)
         and not _LIVE_EXPAND_SUPPRESS_AUTO_MERGE
@@ -7530,11 +9775,9 @@ def _live_expand_timer():
     merge_settings = (
         merge_enabled,
         str(getattr(scene, "prop_plasticity_auto_seam_mode", "CYLINDER")),
-        str(scene.prop_plasticity_auto_cylinder_seam_mode),
-        float(scene.prop_plasticity_auto_cylinder_partial_angle),
-        occluded_only,
+        seam_facing,
     )
-    view_context = _find_view3d_region(scene) if occluded_only else None
+    view_context = _find_view3d_region(scene) if seam_facing else None
 
     any_changes = False
     prev_active = context.view_layer.objects.active
@@ -7606,12 +9849,7 @@ def _live_expand_timer():
                     cylinder_changed = _auto_cylinder_seam_on_selection(
                         bm,
                         current_selection,
-                        mode=merge_settings[2],
-                        partial_angle=merge_settings[3],
-                        occluded_only=occluded_only,
-                        obj=obj,
-                        scene=scene,
-                        view_context=view_context,
+                        seam_view=_seam_view_in_object(obj, view_context),
                     )
                     if cylinder_changed:
                         changed_to_true.extend(cylinder_changed)
@@ -7620,6 +9858,7 @@ def _live_expand_timer():
                         bm,
                         current_selection,
                         mode=merge_settings[1],
+                        obj=obj,
                     )
                     if sphere_changed:
                         changed_to_true.extend(sphere_changed)
@@ -7733,8 +9972,6 @@ def _live_expand_timer():
                 group_faces,
                 face_to_group,
                 seed_group_indices,
-                seam_mode=str(getattr(scene, "prop_plasticity_auto_cylinder_seam_mode", "FULL")),
-                partial_angle=float(scene.prop_plasticity_auto_cylinder_partial_angle),
                 selection_min_wrap_angle=float(
                     getattr(scene, "prop_plasticity_live_expand_cylinder_min_wrap_angle", 120.0)
                 ),
@@ -7742,6 +9979,7 @@ def _live_expand_timer():
                 fillet_min_curvature_angle=float(scene.prop_plasticity_select_fillet_min_curvature_angle),
                 fillet_max_area_ratio=float(scene.prop_plasticity_select_fillet_max_area_ratio),
                 fillet_min_adjacent_groups=int(scene.prop_plasticity_select_fillet_min_adjacent_groups),
+                obj=obj,
             )
             if cylinder_group_indices:
                 seed_group_indices.update(cylinder_group_indices)
@@ -7773,12 +10011,7 @@ def _live_expand_timer():
                     cylinder_changed = _auto_cylinder_seam_on_selection(
                         bm,
                         expanded_faces,
-                        mode=merge_settings[2],
-                        partial_angle=merge_settings[3],
-                        occluded_only=occluded_only,
-                        obj=obj,
-                        scene=scene,
-                        view_context=view_context,
+                        seam_view=_seam_view_in_object(obj, view_context),
                     )
                     if cylinder_changed:
                         changed_to_true.extend(cylinder_changed)
@@ -7787,6 +10020,7 @@ def _live_expand_timer():
                         bm,
                         expanded_faces,
                         mode=merge_settings[1],
+                        obj=obj,
                     )
                     if sphere_changed:
                         changed_to_true.extend(sphere_changed)
@@ -7922,12 +10156,7 @@ def _live_expand_timer():
                 cylinder_changed = _auto_cylinder_seam_on_selection(
                     bm,
                     expanded_faces,
-                    mode=merge_settings[2],
-                    partial_angle=merge_settings[3],
-                    occluded_only=occluded_only,
-                    obj=obj,
-                    scene=scene,
-                    view_context=view_context,
+                    seam_view=_seam_view_in_object(obj, view_context),
                 )
                 if cylinder_changed:
                     changed_to_true.extend(cylinder_changed)
@@ -7936,6 +10165,7 @@ def _live_expand_timer():
                     bm,
                     expanded_faces,
                     mode=merge_settings[1],
+                    obj=obj,
                 )
                 if sphere_changed:
                     changed_to_true.extend(sphere_changed)
@@ -7970,8 +10200,10 @@ def build_group_data(groups, mesh, bm):
     return group_faces, face_to_group, group_areas, group_max_angles
 
 
-def build_group_adjacency(bm, face_to_group, group_count):
+def build_group_adjacency(bm, face_to_group, group_count, max_normal_angle=None):
     adjacency = [set() for _ in range(group_count)]
+    blocked_pairs = set()
+    min_dot = math.cos(max_normal_angle) if max_normal_angle is not None else None
     for edge in bm.edges:
         if len(edge.link_faces) != 2:
             continue
@@ -7980,8 +10212,14 @@ def build_group_adjacency(bm, face_to_group, group_count):
         group_b = face_to_group.get(face_b.index)
         if group_a is None or group_b is None or group_a == group_b:
             continue
+        if min_dot is not None and face_a.normal.dot(face_b.normal) < min_dot - 1e-6:
+            blocked_pairs.add((min(group_a, group_b), max(group_a, group_b)))
         adjacency[group_a].add(group_b)
         adjacency[group_b].add(group_a)
+    # Do not bypass a sharp rim through a smoother edge of the same CAD pair.
+    for group_a, group_b in blocked_pairs:
+        adjacency[group_a].discard(group_b)
+        adjacency[group_b].discard(group_a)
     return adjacency
 
 
@@ -8000,6 +10238,59 @@ def build_group_vertex_adjacency(bm, face_to_group, group_count):
     return adjacency
 
 
+
+def _cylinder_groups_share_cross_section(bm, first_faces, second_faces, fitted_axis=None):
+    """Allow a coarse facet join only when its vertices share a cylinder.
+
+    Normal direction alone also accepts slot walls attached to a tube. Fit
+    the projected vertices, not face centers: centers of coarse facets sit
+    inside the circle, and their radii vary with triangulation.
+    """
+    faces = set(first_faces) | set(second_faces)
+    axis = fitted_axis if fitted_axis is not None else _axis_from_normals(bm, faces)
+    if axis is None:
+        return False
+    basis = mathutils.Vector((1.0, 0.0, 0.0))
+    if abs(axis.dot(basis)) > 0.9:
+        basis = mathutils.Vector((0.0, 1.0, 0.0))
+    x_axis = axis.cross(basis).normalized()
+    y_axis = axis.cross(x_axis).normalized()
+    vertices = {v for i in faces for v in bm.faces[i].verts}
+    if len(vertices) < 3:
+        return False
+    points = [(v.co.dot(x_axis), v.co.dot(y_axis)) for v in vertices]
+    count = len(points)
+    mean_x = sum(x for x, y in points) / count
+    mean_y = sum(y for x, y in points) / count
+    scale = max(max(x for x, y in points) - min(x for x, y in points),
+                max(y for x, y in points) - min(y for x, y in points))
+    if scale <= 0.0:
+        return False
+    points = [((x - mean_x) / scale, (y - mean_y) / scale) for x, y in points]
+    # Least squares: 2*cx*x + 2*cy*y + c = x*x + y*y.
+    matrix = [[0.0] * 3 for _ in range(3)]
+    rhs = [0.0] * 3
+    for x, y in points:
+        row = (2.0 * x, 2.0 * y, 1.0)
+        squared = x * x + y * y
+        for i in range(3):
+            rhs[i] += row[i] * squared / count
+            for j in range(3):
+                matrix[i][j] += row[i] * row[j] / count
+    matrix = mathutils.Matrix(matrix)
+    if abs(matrix.determinant()) < 1e-10:
+        return False
+    cx, cy, constant = matrix.inverted() @ mathutils.Vector(rhs)
+    radius_squared = constant + cx * cx + cy * cy
+    if radius_squared <= 0.0:
+        return False
+    radius = math.sqrt(radius_squared)
+    # A small relative tolerance accommodates imported mesh precision while
+    # rejecting a wall that departs from the tube's cross-section.
+    return all(abs(math.hypot(x - cx, y - cy) - radius) <= radius * 0.01
+               for x, y in points)
+
+
 def _group_cylinder_stats(bm, face_indices, axis):
     if bm is None or not face_indices or axis is None:
         return None
@@ -8012,6 +10303,8 @@ def _group_cylinder_stats(bm, face_indices, axis):
     radius_sum = 0.0
     radius_sq_sum = 0.0
     normal_dot_sum = 0.0
+    normal_dot_max = 0.0
+    total_area = 0.0
     for face_index in face_indices:
         if face_index >= len(bm.faces):
             continue
@@ -8022,23 +10315,230 @@ def _group_cylinder_stats(bm, face_indices, axis):
         r = radial.length
         radius_sum += r
         radius_sq_sum += r * r
-        normal_dot_sum += abs(face.normal.dot(axis))
+        area = face.calc_area()
+        normal_dot = abs(face.normal.dot(axis))
+        normal_dot_sum += area * normal_dot
+        if area > 0.0:
+            normal_dot_max = max(normal_dot_max, normal_dot)
+        total_area += area
         count += 1
-    if count == 0:
+    if count == 0 or total_area <= 0.0:
         return None
     axis_perp_center = axis_perp_sum / count
     radius_mean = radius_sum / count
     radius_var = (radius_sq_sum / count) - (radius_mean * radius_mean)
     radius_std = math.sqrt(max(0.0, radius_var))
-    normal_alignment = normal_dot_sum / count
+    normal_alignment = normal_dot_sum / total_area
     return {
         "axis": axis,
         "axis_perp_center": axis_perp_center,
         "radius_mean": radius_mean,
         "radius_std": radius_std,
         "normal_alignment": normal_alignment,
+        "normal_alignment_max": normal_dot_max,
+        "area": total_area,
         "face_count": count,
     }
+
+
+def _symmetric_matrix(values):
+    xx, xy, xz, yy, yz, zz = values
+    return [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]
+
+
+class _CylinderGroupIndex:
+    def __init__(self, bm, group_faces, face_to_group, fillet_settings):
+        count = len(group_faces)
+        self.area = [0.0] * count
+        self.weight = [0.0] * count
+        self.normal_count = [0] * count
+        self.moment = [[0.0] * 6 for _ in group_faces]
+        self.center_count = [0] * count
+        self.center_sum = [[0.0] * 3 for _ in group_faces]
+        self.center_moment = [[0.0] * 6 for _ in group_faces]
+        self.max_angle = [0.0] * count
+        self.reference = tuple(
+            (min(v.co[i] for v in bm.verts) + max(v.co[i] for v in bm.verts)) * 0.5
+            for i in range(3)
+        ) if bm.verts else (0.0, 0.0, 0.0)
+        for group_idx, faces in enumerate(group_faces):
+            normal_sum = mathutils.Vector((0.0, 0.0, 0.0))
+            moment = self.moment[group_idx]
+            center_sum = self.center_sum[group_idx]
+            center_moment = self.center_moment[group_idx]
+            for face_index in faces:
+                if face_index >= len(bm.faces):
+                    continue
+                face = bm.faces[face_index]
+                area = face.calc_area()
+                self.area[group_idx] += area
+                normal = face.normal
+                normal_sum += normal
+                if normal.length > 1e-8:
+                    x, y, z = normal.normalized()
+                    self.weight[group_idx] += area
+                    self.normal_count[group_idx] += 1
+                    for i, value in enumerate((x*x, x*y, x*z, y*y, y*z, z*z)):
+                        moment[i] += area * value
+                center = face.calc_center_median()
+                x, y, z = (center[i] - self.reference[i] for i in range(3))
+                self.center_count[group_idx] += 1
+                for i, value in enumerate((x, y, z)):
+                    center_sum[i] += value
+                for i, value in enumerate((x*x, x*y, x*z, y*y, y*z, z*z)):
+                    center_moment[i] += value
+            average = (normal_sum.normalized() if normal_sum.length_squared > 0.0
+                       else mathutils.Vector((0.0, 0.0, 1.0)))
+            for face_index in faces:
+                if face_index >= len(bm.faces):
+                    continue
+                dot = max(-1.0, min(1.0, average.dot(bm.faces[face_index].normal)))
+                self.max_angle[group_idx] = max(self.max_angle[group_idx], math.degrees(math.acos(dot)))
+
+        pair_dots = {}
+        for edge in bm.edges:
+            if len(edge.link_faces) != 2:
+                continue
+            first, second = edge.link_faces
+            a, b = face_to_group.get(first.index), face_to_group.get(second.index)
+            if a is None or b is None or a == b:
+                continue
+            pair = (min(a, b), max(a, b))
+            dot = first.normal.dot(second.normal)
+            pair_dots[pair] = min(pair_dots.get(pair, dot), dot)
+        self.adjacency = [set() for _ in group_faces]
+        self.growth_adjacency = [set() for _ in group_faces]
+        self.all_adjacency = [set() for _ in group_faces]
+        for (a, b), dot in pair_dots.items():
+            for graph, threshold in ((self.adjacency, math.cos(math.radians(45)) - 1e-6),
+                                     (self.growth_adjacency, math.cos(math.radians(60)) - 1e-6),
+                                     (self.all_adjacency, -math.inf)):
+                if dot >= threshold:
+                    graph[a].add(b)
+                    graph[b].add(a)
+        self.fillet_groups = {
+            i for i in range(count) if is_fillet_group(
+                i, self.area, self.max_angle, self.all_adjacency, *fillet_settings)
+        }
+
+    def normal_axis(self, groups):
+        weight = sum(self.weight[g] for g in groups)
+        if sum(self.normal_count[g] for g in groups) < 2 or weight <= 0.0:
+            return None
+        moment = [sum(self.moment[g][i] for g in groups) / weight for i in range(6)]
+        values, vectors = _jacobi_eigen_3x3(_symmetric_matrix(moment))
+        if not vectors:
+            return None
+        order = sorted(range(3), key=lambda i: values[i])
+        if values[order[1]] <= 1e-6 or values[order[0]] > values[order[1]] * 0.1:
+            return None
+        axis = vectors[order[0]]
+        return axis.normalized() if axis.length >= 1e-6 else None
+
+    def long_axis(self, bm, group_faces, groups):
+        count = sum(self.center_count[g] for g in groups)
+        if not count:
+            return None, None
+        mean = [sum(self.center_sum[g][i] for g in groups) / count for i in range(3)]
+        x, y, z = mean
+        products = (x*x, x*y, x*z, y*y, y*z, z*z)
+        covariance = [sum(self.center_moment[g][i] for g in groups) - count * products[i]
+                      for i in range(6)]
+        center = mathutils.Vector(tuple(mean[i] + self.reference[i] for i in range(3)))
+        values, vectors = _jacobi_eigen_3x3(_symmetric_matrix(covariance))
+        if not vectors:
+            return None, center
+        normals = []
+        faces = {i for g in groups for i in group_faces[g]}
+        for face_index in faces:
+            if face_index >= len(bm.faces):
+                continue
+            normal = bm.faces[face_index].normal
+            if normal.length > 1e-8:
+                normals.append(normal.normalized())
+        best_axis = best_score = None
+        if normals:
+            for axis in vectors:
+                if axis.length < 1e-6:
+                    continue
+                axis = axis.normalized()
+                score = sum(abs(n.dot(axis)) for n in normals) / len(normals)
+                if best_score is None or score < best_score:
+                    best_axis, best_score = axis, score
+        if best_axis is None:
+            best_axis = vectors[max(range(3), key=lambda i: values[i])]
+            if best_axis.length < 1e-6:
+                return None, center
+            best_axis = best_axis.normalized()
+        return best_axis, center
+
+
+def _get_cylinder_group_index(bm, group_faces, face_to_group, fillet_settings, obj=None):
+    if obj is None:
+        return _CylinderGroupIndex(bm, group_faces, face_to_group, fillet_settings)
+    # Selection, seams and UVs do not invalidate geometry. Compare coordinates
+    # and topology as well as counts: a refresh can replace either in place.
+    bm.verts.index_update()
+    positions = array('f', (value for vert in bm.verts for value in vert.co)).tobytes()
+    topology = array('i')
+    for face in bm.faces:
+        topology.append(len(face.verts))
+        topology.extend(vert.index for vert in face.verts)
+    signature = (obj.as_pointer(), obj.data.as_pointer(), len(bm.verts), len(bm.edges),
+                 len(bm.faces), positions, topology.tobytes(),
+                 tuple(tuple(faces) for faces in group_faces), fillet_settings)
+    cache = _CYLINDER_GROUP_INDEX_CACHE.get(obj.name_full)
+    if (cache and cache['groups'] is group_faces and cache['signature'] == signature
+            and cache['face_to_group'] == face_to_group):
+        return cache['index']
+    index = _CylinderGroupIndex(bm, group_faces, face_to_group, fillet_settings)
+    _CYLINDER_GROUP_INDEX_CACHE[obj.name_full] = {
+        'groups': group_faces, 'signature': signature,
+        'face_to_group': face_to_group.copy(), 'index': index,
+    }
+    return index
+
+
+class _CylinderGroupQuery:
+    def __init__(self, bm, group_faces, index):
+        self.bm = bm
+        self.group_faces = group_faces
+        self.index = index
+        self.normal_axes = {}
+        self.long_axes = {}
+        self.planar_axes = {}
+        self.alignments = {}
+
+    def normal_axis(self, groups):
+        key = frozenset(groups)
+        if key not in self.normal_axes:
+            self.normal_axes[key] = self.index.normal_axis(key)
+        return self.normal_axes[key]
+
+    def long_axis(self, groups):
+        key = frozenset(groups)
+        if key not in self.long_axes:
+            self.long_axes[key] = self.index.long_axis(self.bm, self.group_faces, key)
+        return self.long_axes[key]
+
+    def planar_axis(self, group):
+        if group not in self.planar_axes:
+            self.planar_axes[group] = _axis_from_planar_patch(self.bm, self.group_faces[group])
+        return self.planar_axes[group]
+
+    def normal_alignment_max(self, group, axis):
+        key = group, tuple(axis)
+        if key not in self.alignments:
+            alignment = None
+            if self.index.area[group] > 0.0 and axis.length > 1e-8:
+                axis = axis.normalized()
+                alignment = max(
+                    (abs(self.bm.faces[i].normal.dot(axis)) for i in self.group_faces[group]
+                     if i < len(self.bm.faces) and self.bm.faces[i].calc_area() > 0.0),
+                    default=0.0,
+                )
+            self.alignments[key] = alignment
+        return self.alignments[key]
 
 
 def _collect_cylinder_cluster_for_seed(
@@ -8054,6 +10554,9 @@ def _collect_cylinder_cluster_for_seed(
     exclude_fillets,
     fillet_groups,
     normal_dot_max,
+    query,
+    growth_adjacency=None,
+    growth_edge_filter=None,
 ):
     if bm is None or not group_faces:
         return None
@@ -8075,25 +10578,20 @@ def _collect_cylinder_cluster_for_seed(
                     if neighbor >= len(group_faces) or not group_faces[neighbor]:
                         continue
                     axis_group_indices.add(neighbor)
-                    if not (exclude_fillets and neighbor in fillet_groups):
-                        axis_face_groups.add(neighbor)
+                    # Rounded slot walls also satisfy the generic fillet
+                    # heuristic. Keep their axis evidence inside this rim.
+                    axis_face_groups.add(neighbor)
                     next_frontier.add(neighbor)
             if not next_frontier:
                 break
             frontier = next_frontier
 
-    if smart_side_axis:
-        axis_faces = set()
-        for group_idx in axis_face_groups:
-            axis_faces.update(group_faces[group_idx])
-    else:
-        axis_faces = set(group_faces[seed_group_idx])
-        for neighbor in adjacency[seed_group_idx]:
-            if neighbor < len(group_faces):
-                axis_faces.update(group_faces[neighbor])
+    ring_groups = axis_face_groups if smart_side_axis else (
+        {seed_group_idx} | {g for g in adjacency[seed_group_idx] if g < len(group_faces)}
+    )
+    axis_faces = {i for g in ring_groups for i in group_faces[g]}
     if not axis_faces:
         return None
-    seed_faces = group_faces[seed_group_idx]
 
     def _append_axis_unique(target, axis):
         if axis is None:
@@ -8103,21 +10601,21 @@ def _collect_cylinder_cluster_for_seed(
             return
         target.append(axis)
 
-    side_axis = _axis_from_normals(bm, axis_faces)
+    side_axis = query.normal_axis(ring_groups)
     faceted_axes = []
     if allow_faceted_axis:
         if smart_side_axis:
             for group_idx in axis_face_groups:
                 _append_axis_unique(
                     faceted_axes,
-                    _axis_from_planar_patch(bm, group_faces[group_idx]),
+                    query.planar_axis(group_idx),
                 )
         else:
-            faceted_axis = _axis_from_planar_patch(bm, seed_faces)
+            faceted_axis = query.planar_axis(seed_group_idx)
             if faceted_axis is not None:
                 side_axis = faceted_axis
 
-    long_axis, _ = _estimate_axis_from_faces(bm, axis_faces)
+    long_axis, _ = query.long_axis(ring_groups)
     ref_axis = None
     if axis_override and axis_mode == 'LONG':
         ref_axis = long_axis
@@ -8128,83 +10626,103 @@ def _collect_cylinder_cluster_for_seed(
 
     if smart_side_axis or not axis_override:
         if not (axis_override and axis_mode == 'LONG'):
-            score_fn = (
-                _score_axis_for_side_faces_combined
-                if smart_side_axis
-                else _score_axis_for_cylinder
-            )
+            score_fn = _score_axis_for_side_faces_combined
             axis_candidates = []
+            _append_axis_unique(axis_candidates, query.normal_axis({seed_group_idx}))
+            for group_idx in sorted(axis_face_groups | adjacency[seed_group_idx]):
+                _append_axis_unique(
+                    axis_candidates, query.normal_axis({group_idx})
+                )
+                # Two neighboring planar walls determine their shared axis,
+                # even when each is a single quad and nearby bevels pollute
+                # the combined neighborhood fit.
+                _append_axis_unique(
+                    axis_candidates,
+                    query.normal_axis({seed_group_idx, group_idx}),
+                )
             for axis in faceted_axes:
                 _append_axis_unique(axis_candidates, axis)
             _append_axis_unique(axis_candidates, side_axis)
             if not axis_override:
                 _append_axis_unique(axis_candidates, long_axis)
 
+            if not axis_candidates:
+                return None
             if axis_candidates:
                 best_axis = None
-                best_score = None
+                best_closing = best_extent = None
                 for axis in axis_candidates:
-                    seed_stats = _group_cylinder_stats(bm, seed_faces, axis)
-                    if seed_stats is None or seed_stats["normal_alignment"] > normal_dot_max:
+                    seed_alignment = query.normal_alignment_max(seed_group_idx, axis)
+                    if seed_alignment is None or seed_alignment > normal_dot_max:
+                        continue
+                    # A few triangles of a curved group are not evidence for
+                    # a different cylinder. Require whole supporting groups
+                    # to establish a unique common perpendicular. A flat wall
+                    # alone cannot validate the shell's longitudinal axis.
+                    support_faces = set()
+                    support_groups = set()
+                    for group_idx in axis_face_groups | adjacency[seed_group_idx]:
+                        alignment = query.normal_alignment_max(group_idx, axis)
+                        if alignment is not None and alignment <= normal_dot_max:
+                            support_faces.update(group_faces[group_idx])
+                            support_groups.add(group_idx)
+                    support_axis = query.normal_axis(support_groups)
+                    if support_axis is None or abs(support_axis.dot(axis)) < 0.99:
                         continue
                     score = score_fn(
                         bm,
-                        axis_faces,
+                        support_faces,
                         axis,
                         normal_dot_max,
                     )
                     if score is None:
                         continue
-                    if best_score is None or score > best_score:
-                        best_score = score
+                    closing, extent = score
+                    if best_axis is None or _cylinder_closer(
+                        closing, extent, best_closing, best_extent
+                    ):
+                        best_closing, best_extent = closing, extent
                         best_axis = axis
-                if best_axis is not None:
-                    ref_axis = best_axis
+                if best_axis is None:
+                    return None
+                ref_axis = best_axis
 
     if ref_axis is None:
         axes, _ = _candidate_axes_from_faces(bm, set(axis_faces))
         ref_axis = axes[0] if axes else None
     if ref_axis is None:
         return None
-    ref_stats = _group_cylinder_stats(
-        bm,
-        group_faces[seed_group_idx],
-        ref_axis,
-    )
-    if ref_stats is None:
+    ref_alignment = query.normal_alignment_max(seed_group_idx, ref_axis)
+    if ref_alignment is None:
         return None
-    if ref_stats["normal_alignment"] > normal_dot_max:
+    if ref_alignment > normal_dot_max:
         return None
 
-    stats_cache = {}
-
-    def _get_stats(group_idx):
-        cached = stats_cache.get(group_idx)
-        if cached is not None:
-            return cached
-        stats = _group_cylinder_stats(
-            bm,
-            group_faces[group_idx],
-            ref_axis,
-        )
-        stats_cache[group_idx] = stats
-        return stats
-
+    # Fit the axis using smooth neighbors first. Growth can cross coarse
+    # facet boundaries only after that axis is fixed and each entire group
+    # has been checked against it.
+    if growth_adjacency is None:
+        growth_adjacency = adjacency
     cluster_groups = {seed_group_idx}
     queue = [seed_group_idx]
     while queue:
         current = queue.pop()
-        for neighbor in adjacency[current]:
+        for neighbor in growth_adjacency[current]:
             if neighbor in cluster_groups:
                 continue
             if neighbor >= len(group_faces) or not group_faces[neighbor]:
                 continue
+            if growth_edge_filter is not None and not growth_edge_filter(current, neighbor):
+                continue
+            alignment = query.normal_alignment_max(neighbor, ref_axis)
+            if alignment is None:
+                continue
+            limit = normal_dot_max
             if exclude_fillets and neighbor in fillet_groups:
-                continue
-            neighbor_stats = _get_stats(neighbor)
-            if neighbor_stats is None:
-                continue
-            if neighbor_stats["normal_alignment"] > normal_dot_max:
+                # Rounded walls sharing the extrusion axis belong to the
+                # selection. Bevels turning towards a cap still stay out.
+                limit = min(limit, 0.1)
+            if alignment > limit:
                 continue
             cluster_groups.add(neighbor)
             queue.append(neighbor)
@@ -8239,7 +10757,11 @@ def _collect_cylinder_cluster_for_seed(
         y_axis,
         bm=bm,
     )
-    if wrap_angle is None or wrap_angle < wrap_threshold:
+    normal_wrap = _wrap_angle_for_normals(bm, cluster_faces, ref_axis)
+    if wrap_angle is None or normal_wrap is None:
+        return None
+    wrap_angle = min(wrap_angle, normal_wrap)
+    if wrap_angle < wrap_threshold:
         return None
 
     side_face_count = 0
@@ -8256,6 +10778,7 @@ def _collect_cylinder_cluster_for_seed(
         "axis": ref_axis,
         "wrap_angle": wrap_angle,
         "side_face_count": side_face_count,
+        "area": sum(bm.faces[i].calc_area() for i in cluster_faces),
     }
 
 
@@ -8271,30 +10794,45 @@ def _collect_cylinder_groups_for_seeds(
     fillet_min_curvature_angle=5.0,
     fillet_max_area_ratio=0.06,
     fillet_min_adjacent_groups=2,
+    obj=None,
 ):
     if bm is None or not group_faces or not seed_group_indices:
         return set()
     bm.faces.ensure_lookup_table()
     bm.normal_update()
+    index = _get_cylinder_group_index(
+        bm, group_faces, face_to_group,
+        (fillet_min_curvature_angle, fillet_max_area_ratio, fillet_min_adjacent_groups),
+        obj=obj,
+    )
+    query = _CylinderGroupQuery(bm, group_faces, index)
 
-    adjacency = build_group_adjacency(bm, face_to_group, len(group_faces))
+    # A smooth wall neighborhood takes precedence over a larger surface
+    # joined at an oblique rim. Coarse facets may need a wider graph, but
+    # that graph must not outvote a valid axis from the smooth neighborhood.
+    adjacency = index.adjacency
+    growth_adjacency = index.growth_adjacency
+
+    # Smooth wall joins need no circularity requirement (rounded slots are
+    # valid). A coarse join must actually continue the same cylinder, in
+    # either selection direction. Evaluate only reached edges and reuse the
+    # result across axis strategies.
+    coarse_join_cache = {}
+
+    def _can_cross_group_boundary(first, second):
+        if second in adjacency[first]:
+            return True
+        key = (min(first, second), max(first, second))
+        if key not in coarse_join_cache:
+            axis = query.normal_axis(key)
+            coarse_join_cache[key] = axis is not None and _cylinder_groups_share_cross_section(
+                bm, group_faces[first], group_faces[second], fitted_axis=axis,
+            )
+        return coarse_join_cache[key]
 
     normal_dot_max = 0.35
 
-    fillet_groups = set()
-    if exclude_fillets and group_faces:
-        group_areas, group_max_angles = compute_group_stats(group_faces, bm)
-        for group_idx in range(len(group_faces)):
-            if is_fillet_group(
-                group_idx,
-                group_areas,
-                group_max_angles,
-                adjacency,
-                fillet_min_curvature_angle,
-                fillet_max_area_ratio,
-                fillet_min_adjacent_groups,
-            ):
-                fillet_groups.add(group_idx)
+    fillet_groups = index.fillet_groups if exclude_fillets else set()
 
     accepted_groups = set()
     processed_seeds = set()
@@ -8317,56 +10855,46 @@ def _collect_cylinder_groups_for_seeds(
         if seed_group_idx >= len(group_faces):
             continue
 
-        # For planar side seeds, prioritize faceted-from-seed behavior because it
-        # is the most stable on large flat side patches.
-        preferred_result = None
-        seed_planar_axis = _axis_from_planar_patch(bm, group_faces[seed_group_idx])
-        if seed_planar_axis is not None:
-            preferred_result = _collect_cylinder_cluster_for_seed(
-                bm,
-                group_faces,
-                adjacency,
-                seed_group_idx,
-                auto_wrap_threshold,
-                False,
-                'SIDE',
-                False,
-                True,
-                True,
-                fillet_groups,
-                normal_dot_max,
-            )
-        if preferred_result is not None:
-            accepted_groups.update(preferred_result["groups"])
-            continue
-
+        # Compare all strategies; a plausible planar axis must not bypass
+        # a better-supported curved-wall axis.
         best_result = None
-        best_score = None
-        for strategy_smart_side_axis, strategy_faceted_axis in strategy_order:
-            result = _collect_cylinder_cluster_for_seed(
-                bm,
-                group_faces,
-                adjacency,
-                seed_group_idx,
-                auto_wrap_threshold,
-                False,
-                'SIDE',
-                strategy_smart_side_axis,
-                strategy_faceted_axis,
-                True,
-                fillet_groups,
-                normal_dot_max,
-            )
-            if result is None:
-                continue
-            score = (
-                int(result["side_face_count"]),
-                float(result["wrap_angle"]),
-                len(result["groups"]),
-            )
-            if best_score is None or score > best_score:
-                best_score = score
-                best_result = result
+        for axis_adjacency in (adjacency, growth_adjacency):
+            for strategy_smart_side_axis, strategy_faceted_axis in strategy_order:
+                result = _collect_cylinder_cluster_for_seed(
+                    bm,
+                    group_faces,
+                    axis_adjacency,
+                    seed_group_idx,
+                    auto_wrap_threshold,
+                    False,
+                    'SIDE',
+                    strategy_smart_side_axis,
+                    strategy_faceted_axis,
+                    exclude_fillets,
+                    fillet_groups,
+                    normal_dot_max,
+                    query,
+                    growth_adjacency=growth_adjacency,
+                    growth_edge_filter=_can_cross_group_boundary,
+                )
+                if result is None:
+                    continue
+                better = (
+                    best_result is None
+                    or _cylinder_closer(
+                        result["wrap_angle"], result["area"],
+                        best_result["wrap_angle"], best_result["area"],
+                    )
+                    or (abs(result["wrap_angle"] - best_result["wrap_angle"])
+                        <= _CYLINDER_WRAP_SLACK
+                        and result["area"] == best_result["area"]
+                        and len(result["groups"]) > len(best_result["groups"]))
+                )
+                if better:
+                    best_result = result
+
+            if best_result is not None:
+                break
 
         if best_result is not None:
             accepted_groups.update(best_result["groups"])
@@ -8947,7 +11475,7 @@ class NonOverlappingMeshesMerger(bpy.types.Operator):
         return object_data
 
     def merge_meshes(self, obj1, obj2):
-        bpy.ops.object.select_all(action='DESELECT') 
+        bpy.ops.object.select_all(action='DESELECT')
         obj1.select_set(True)
         obj2.select_set(True)
         bpy.context.view_layer.objects.active = obj1
@@ -9011,7 +11539,7 @@ class SimilarGeometrySelector(bpy.types.Operator):
         "Ignores transforms and materials"
     )
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     similarity_threshold: bpy.props.FloatProperty(
     name="Similarity Threshold",
     description="Percentage difference between objects to consider them similar",
@@ -9024,7 +11552,7 @@ class SimilarGeometrySelector(bpy.types.Operator):
         if active_object and active_object.type == 'MESH':
             active_vert_count = len(active_object.data.vertices)
             active_poly_count = len(active_object.data.polygons)
-            
+
             # Calculate total surface area for the active object
             active_surface_area = sum(poly.area for poly in active_object.data.polygons)
 
@@ -9032,10 +11560,10 @@ class SimilarGeometrySelector(bpy.types.Operator):
                 if obj.type == 'MESH':
                     vert_count = len(obj.data.vertices)
                     poly_count = len(obj.data.polygons)
-                    
+
                     # Calculate total surface area for the current object
                     surface_area = sum(poly.area for poly in obj.data.polygons)
-                    
+
                     # Calculate percentage difference for vertices, polygons and surface area
                     vert_diff = abs(vert_count - active_vert_count) / active_vert_count
                     poly_diff = abs(poly_count - active_poly_count) / active_poly_count
@@ -9055,7 +11583,7 @@ class SelectedJoiner(bpy.types.Operator):
 
     def execute(self, context):
         bpy.ops.object.join()
-        
+
         return {'FINISHED'}
 
 class SelectedUnjoiner(bpy.types.Operator):
@@ -9078,14 +11606,14 @@ class SelectedUnjoiner(bpy.types.Operator):
 
             temp_name = obj.name + "_temp_unique_name"
             for new_obj in context.selected_objects:
-                if new_obj not in original_objects: 
+                if new_obj not in original_objects:
                     new_obj.name = temp_name
 
         for obj in bpy.data.objects:
             if obj.name.startswith(temp_name):
                 obj.name = obj.name.replace(temp_name, "")
 
-        return {'FINISHED'}    
+        return {'FINISHED'}
 
 class OpenUVEditorOperator(bpy.types.Operator):
     bl_idname = "object.open_uv_editor"
@@ -9136,7 +11664,7 @@ class OpenUVEditorOperator(bpy.types.Operator):
         new_area.spaces.active.mode = 'UV'
 
         new_area.spaces.active.image = None
-        
+
         return {'FINISHED'}
 
 class MaterialRemover(bpy.types.Operator):
@@ -9166,9 +11694,24 @@ class TextureReloader(bpy.types.Operator):
 
 class AssignUVCheckerTextureOperator(bpy.types.Operator):
     bl_idname = "object.assign_uv_checker_texture"
-    bl_label = "Assign Checker Texture"
-    bl_description = "Assign a UV checker image material to selected mesh objects"
+    bl_label = "Toggle Checker Texture"
+    bl_description = (
+        "Toggle the UV checker material on selected mesh objects. "
+        "Removal restores the previous per-face material assignments"
+    )
     bl_options = {'REGISTER', 'UNDO'}
+
+    action: bpy.props.EnumProperty(
+        items=[
+            ('TOGGLE', "Toggle", "Assign, or remove when all targets have it"),
+            ('ASSIGN', "Assign", "Assign the checker material"),
+            ('REMOVE', "Remove", "Remove the checker and restore materials"),
+        ],
+        default='TOGGLE',
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+
+    _SNAPSHOT_KEY = "plasticity_checker_prev_idx"
 
     @classmethod
     def poll(cls, context):
@@ -9180,6 +11723,28 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
         return any(obj.type == 'MESH' for obj in context.selected_objects)
 
     def execute(self, context):
+        objects = self._target_objects(context)
+        if not objects:
+            self.report({'WARNING'}, "No mesh objects to update")
+            return {'CANCELLED'}
+        meshes = []
+        seen = set()
+        for obj in objects:
+            mesh = obj.data
+            if mesh is None or mesh.as_pointer() in seen:
+                continue
+            seen.add(mesh.as_pointer())
+            meshes.append(mesh)
+
+        action = self.action
+        if action == 'TOGGLE':
+            action = 'REMOVE' if meshes and all(
+                self._mesh_has_checker(mesh) for mesh in meshes) else 'ASSIGN'
+        if action == 'REMOVE':
+            return self._execute_remove(context, objects, meshes)
+        return self._execute_assign(context, objects)
+
+    def _execute_assign(self, context, objects):
         filepath = self._resolve_image_path(context)
         if not filepath:
             return {'CANCELLED'}
@@ -9193,22 +11758,26 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         material = self._get_checker_material(image)
-        objects = self._target_objects(context)
-        if not objects:
-            self.report({'WARNING'}, "No mesh objects to assign")
-            return {'CANCELLED'}
 
         assigned = 0
         for obj in objects:
             if obj.type != 'MESH':
                 continue
             mesh = obj.data
+            had_checker = self._mesh_has_checker(mesh)
+            # Keep the user's active slot; appending the checker must not
+            # change which material other tools operate on.
+            prev_active = int(obj.active_material_index)
+            had_slots = len(mesh.materials) > 0
             if context.mode == 'EDIT_MESH' and obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(mesh)
                 self._ensure_uv_map_edit(mesh, bm)
                 selected_faces = [face for face in bm.faces if face.select]
                 if not selected_faces:
                     continue
+                if not had_checker:
+                    self._snapshot_face_materials(
+                        mesh, [int(f.material_index) for f in bm.faces])
                 slot_index = self._ensure_material_slot(mesh, material)
                 for face in selected_faces:
                     face.material_index = slot_index
@@ -9216,16 +11785,158 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
                 self._ensure_uv_map_object(mesh)
                 assigned += 1
             else:
+                if not had_checker:
+                    self._snapshot_face_materials(
+                        mesh, [int(p.material_index) for p in mesh.polygons])
                 slot_index = self._ensure_material_slot(mesh, material)
                 self._ensure_uv_map_object(mesh)
                 for poly in mesh.polygons:
                     poly.material_index = slot_index
                 assigned += 1
+            if had_slots and obj.active_material_index != prev_active:
+                obj.active_material_index = min(
+                    prev_active, len(mesh.materials) - 1)
 
         if assigned == 0:
             self.report({'WARNING'}, "No selected mesh faces/objects to assign")
             return {'CANCELLED'}
+        self._ensure_viewport_shows_textures(context)
         return {'FINISHED'}
+
+    def _execute_remove(self, context, objects, meshes):
+        previous_mode = context.mode
+        if previous_mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        removed_slots = 0
+        updated_meshes = 0
+        try:
+            for mesh in meshes:
+                # Slot removal first: materials.clear() inside it resets all
+                # polygon indices, so the snapshot must be applied after.
+                removed = self._remove_checker_material_slots(mesh)
+                restored = self._restore_face_materials(mesh)
+                if removed > 0 or restored:
+                    updated_meshes += 1
+                    removed_slots += removed
+            for obj in objects:
+                if obj.type != 'MESH' or obj.data is None:
+                    continue
+                top = max(0, len(obj.data.materials) - 1)
+                if obj.active_material_index > top:
+                    obj.active_material_index = top
+        finally:
+            if previous_mode == 'EDIT_MESH':
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if removed_slots == 0:
+            self.report({'INFO'}, "No checker materials assigned")
+            return {'FINISHED'}
+        self.report({'INFO'}, f"Checker removed from {updated_meshes} mesh(es)")
+        return {'FINISHED'}
+
+    @classmethod
+    def _mesh_has_checker(cls, mesh):
+        return any(cls._is_checker_material(mat) for mat in mesh.materials)
+
+    @classmethod
+    def _snapshot_face_materials(cls, mesh, indices):
+        if cls._SNAPSHOT_KEY in mesh.keys():
+            return
+        mesh[cls._SNAPSHOT_KEY] = indices
+
+    @classmethod
+    def _restore_face_materials(cls, mesh):
+        key = cls._SNAPSHOT_KEY
+        if key not in mesh.keys():
+            return False
+        try:
+            indices = [int(value) for value in mesh[key]]
+        except Exception:
+            indices = None
+        restored = False
+        if indices is not None and len(indices) == len(mesh.polygons):
+            max_index = max(len(mesh.materials) - 1, 0)
+            for poly, index in zip(mesh.polygons, indices):
+                poly.material_index = min(max(index, 0), max_index)
+            restored = True
+        try:
+            del mesh[key]
+        except Exception:
+            pass
+        return restored
+
+    @staticmethod
+    def _ensure_viewport_shows_textures(context):
+        areas = []
+        area = getattr(context, "area", None)
+        if area is not None and area.type == 'VIEW_3D':
+            areas = [area]
+        else:
+            window_manager = context.window_manager
+            if window_manager:
+                areas = [
+                    a for w in window_manager.windows
+                    for a in w.screen.areas if a.type == 'VIEW_3D'
+                ]
+        for view_area in areas:
+            space = view_area.spaces.active
+            shading = getattr(space, "shading", None)
+            if shading is None:
+                continue
+            if shading.type in {'MATERIAL', 'RENDERED'}:
+                continue
+            if shading.type != 'SOLID':
+                shading.type = 'SOLID'
+            if shading.color_type != 'TEXTURE':
+                shading.color_type = 'TEXTURE'
+
+    @staticmethod
+    def _is_checker_material(material):
+        if material is None:
+            return False
+        if "plasticity_uv_checker_image" in material.keys():
+            return True
+        if not material.use_nodes or material.node_tree is None:
+            return False
+        for node in material.node_tree.nodes:
+            if node.type == 'TEX_IMAGE' and node.get("plasticity_uv_checker_node"):
+                return True
+        return False
+
+    @classmethod
+    def _remove_checker_material_slots(cls, mesh):
+        old_materials = list(mesh.materials)
+        if not old_materials:
+            return 0
+
+        checker_old_indices = set()
+        keep_old_to_new = {}
+        kept_materials = []
+
+        for old_idx, material in enumerate(old_materials):
+            if cls._is_checker_material(material):
+                checker_old_indices.add(old_idx)
+                continue
+            keep_old_to_new[old_idx] = len(kept_materials)
+            kept_materials.append(material)
+
+        if not checker_old_indices:
+            return 0
+
+        fallback_index = 0
+        for poly in mesh.polygons:
+            old_idx = int(poly.material_index)
+            new_idx = keep_old_to_new.get(old_idx)
+            if new_idx is None:
+                new_idx = fallback_index
+            if poly.material_index != new_idx:
+                poly.material_index = new_idx
+
+        mesh.materials.clear()
+        for material in kept_materials:
+            mesh.materials.append(material)
+
+        return len(checker_old_indices)
 
     def _resolve_image_path(self, context):
         scene = context.scene
@@ -9277,35 +11988,81 @@ class AssignUVCheckerTextureOperator(bpy.types.Operator):
         if not mesh.uv_layers or bm.loops.layers.uv.active is None:
             bm.loops.layers.uv.verify()
 
-    @staticmethod
-    def _get_checker_material(image):
+    @classmethod
+    def _get_checker_material(cls, image):
         image_id = image.filepath or image.name
-        for mat in bpy.data.materials:
-            if mat.get("plasticity_uv_checker_image") == image_id:
-                return mat
-
-        mat_name = f"Plasticity_UV_Checker_{image.name}" if image.name else "Plasticity_UV_Checker"
-        mat = bpy.data.materials.new(name=mat_name)
-        mat.use_nodes = True
-        nodes = mat.node_tree.nodes
-        for node in list(nodes):
-            nodes.remove(node)
-
-        tex_node = nodes.new(type='ShaderNodeTexImage')
-        tex_node.name = "PlasticityUVCheckerImage"
-        tex_node.label = "Plasticity UV Checker"
-        tex_node["plasticity_uv_checker_node"] = True
-        tex_node.image = image
-        tex_node.location = (-400, 0)
-        bsdf_node = nodes.new(type='ShaderNodeBsdfPrincipled')
-        bsdf_node.location = (0, 0)
-        output_node = nodes.new(type='ShaderNodeOutputMaterial')
-        output_node.location = (300, 0)
-        mat.node_tree.links.new(bsdf_node.inputs['Base Color'], tex_node.outputs['Color'])
-        mat.node_tree.links.new(output_node.inputs['Surface'], bsdf_node.outputs['BSDF'])
-
-        mat["plasticity_uv_checker_image"] = image_id
+        mat = None
+        for candidate in bpy.data.materials:
+            if candidate.get("plasticity_uv_checker_image") == image_id:
+                mat = candidate
+                break
+        if mat is None:
+            mat_name = f"Plasticity_UV_Checker_{image.name}" if image.name else "Plasticity_UV_Checker"
+            mat = bpy.data.materials.new(name=mat_name)
+            mat["plasticity_uv_checker_image"] = image_id
+        cls._ensure_checker_nodes(mat, image)
         return mat
+
+    @staticmethod
+    def _checker_nodes_valid(mat, image):
+        if not mat.use_nodes or mat.node_tree is None:
+            return False
+        nodes = mat.node_tree.nodes
+        tex_node = next(
+            (n for n in nodes
+             if n.type == 'TEX_IMAGE' and n.get("plasticity_uv_checker_node")),
+            None)
+        if tex_node is None or tex_node.image != image:
+            return False
+        bsdf_node = next(
+            (n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        output_node = next(
+            (n for n in nodes
+             if n.type == 'OUTPUT_MATERIAL' and n.is_active_output),
+            None)
+        if bsdf_node is None or output_node is None:
+            return False
+        base = bsdf_node.inputs['Base Color']
+        if not base.links or base.links[0].from_node != tex_node:
+            return False
+        surface = output_node.inputs['Surface']
+        if not surface.links or surface.links[0].from_node != bsdf_node:
+            return False
+        return True
+
+    @classmethod
+    def _ensure_checker_nodes(cls, mat, image):
+        # Other addons can rewire whatever material is
+        # active; this material is ours, so rebuild it whenever the
+        # expected image chain is broken.
+        if not cls._checker_nodes_valid(mat, image):
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            for node in list(nodes):
+                nodes.remove(node)
+            tex_node = nodes.new(type='ShaderNodeTexImage')
+            tex_node.name = "PlasticityUVCheckerImage"
+            tex_node.label = "Plasticity UV Checker"
+            tex_node["plasticity_uv_checker_node"] = True
+            tex_node.image = image
+            tex_node.location = (-400, 0)
+            bsdf_node = nodes.new(type='ShaderNodeBsdfPrincipled')
+            bsdf_node.location = (0, 0)
+            output_node = nodes.new(type='ShaderNodeOutputMaterial')
+            output_node.location = (300, 0)
+            mat.node_tree.links.new(
+                bsdf_node.inputs['Base Color'], tex_node.outputs['Color'])
+            mat.node_tree.links.new(
+                output_node.inputs['Surface'], bsdf_node.outputs['BSDF'])
+        bsdf_node = next(
+            n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        bsdf_node.inputs['Metallic'].default_value = 0.0
+        bsdf_node.inputs['Roughness'].default_value = 1.0
+        tex_node = next(
+            n for n in mat.node_tree.nodes
+            if n.type == 'TEX_IMAGE' and n.get("plasticity_uv_checker_node"))
+        # Solid/Texture shading displays the material's active image node.
+        mat.node_tree.nodes.active = tex_node
 
 
 class SelectCheckerImageOperator(bpy.types.Operator):
@@ -9331,108 +12088,6 @@ class SelectCheckerImageOperator(bpy.types.Operator):
         context.scene.prop_plasticity_checker_custom_path = self.filepath
         context.scene.prop_plasticity_checker_source = "FILE"
         return {'FINISHED'}
-
-
-class RemoveUVCheckerNodesOperator(bpy.types.Operator):
-    bl_idname = "object.remove_uv_checker_nodes"
-    bl_label = "Remove Checker Material"
-    bl_description = "Remove Plasticity checker materials from selected objects"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        objects = AssignUVCheckerTextureOperator._target_objects(context)
-        if not objects:
-            self.report({'WARNING'}, "No mesh objects to update")
-            return {'CANCELLED'}
-        previous_mode = context.mode
-        if previous_mode == 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        try:
-            mesh_targets = {}
-            for obj in objects:
-                if obj.type != 'MESH' or obj.data is None:
-                    continue
-                mesh = obj.data
-                mesh_key = mesh.as_pointer()
-                entry = mesh_targets.get(mesh_key)
-                if entry is None:
-                    entry = {"mesh": mesh, "object_count": 0}
-                    mesh_targets[mesh_key] = entry
-                entry["object_count"] += 1
-
-            updated_meshes = 0
-            updated_objects = 0
-            removed_slots = 0
-            for entry in mesh_targets.values():
-                mesh = entry["mesh"]
-                removed_for_mesh = self._remove_checker_material_slots(mesh)
-                if removed_for_mesh <= 0:
-                    continue
-                updated_meshes += 1
-                updated_objects += entry["object_count"]
-                removed_slots += removed_for_mesh
-        finally:
-            if previous_mode == 'EDIT_MESH':
-                bpy.ops.object.mode_set(mode='EDIT')
-
-        if removed_slots == 0:
-            self.report({'INFO'}, "No checker materials assigned")
-            return {'FINISHED'}
-
-        self.report(
-            {'INFO'},
-            f"Removed {removed_slots} checker material slot(s) on {updated_objects} object(s), {updated_meshes} mesh(es)",
-        )
-        return {'FINISHED'}
-
-    @staticmethod
-    def _is_checker_material(material):
-        if material is None:
-            return False
-        if "plasticity_uv_checker_image" in material.keys():
-            return True
-        if not material.use_nodes or material.node_tree is None:
-            return False
-        for node in material.node_tree.nodes:
-            if node.type == 'TEX_IMAGE' and node.get("plasticity_uv_checker_node"):
-                return True
-        return False
-
-    @classmethod
-    def _remove_checker_material_slots(cls, mesh):
-        old_materials = list(mesh.materials)
-        if not old_materials:
-            return 0
-
-        checker_old_indices = set()
-        keep_old_to_new = {}
-        kept_materials = []
-
-        for old_idx, material in enumerate(old_materials):
-            if cls._is_checker_material(material):
-                checker_old_indices.add(old_idx)
-                continue
-            keep_old_to_new[old_idx] = len(kept_materials)
-            kept_materials.append(material)
-
-        if not checker_old_indices:
-            return 0
-
-        fallback_index = 0
-        for poly in mesh.polygons:
-            old_idx = int(poly.material_index)
-            new_idx = keep_old_to_new.get(old_idx)
-            if new_idx is None:
-                new_idx = fallback_index
-            if poly.material_index != new_idx:
-                poly.material_index = new_idx
-
-        mesh.materials.clear()
-        for material in kept_materials:
-            mesh.materials.append(material)
-
-        return len(checker_old_indices)
 
 
 class CloseUVEditorOperator(bpy.types.Operator):

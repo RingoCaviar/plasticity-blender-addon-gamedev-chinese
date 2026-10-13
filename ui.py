@@ -11,6 +11,16 @@ def _pin_icon(scene, prop_name):
     return "PINNED" if getattr(scene, prop_name) else "UNPINNED"
 
 
+def _checker_toggle_depress(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'MESH' or obj.data is None:
+        return False
+    for mat in obj.data.materials:
+        if mat is not None and "plasticity_uv_checker_image" in mat.keys():
+            return True
+    return False
+
+
 def _is_outbox_object(obj):
     try:
         return any("outbox" in collection for collection in obj.users_collection)
@@ -270,10 +280,10 @@ class ConnectButton(bpy.types.Operator):
     def execute(self, context):
         server = context.scene.prop_plasticity_server
         plasticity_client.connect(server)
-        
+
         # Load the refacet presets after connecting (not ideal, but works for now).
         load_presets(context.scene)
-        
+
         return {'FINISHED'}
 
 
@@ -447,8 +457,8 @@ class RefacetButton(bpy.types.Operator):
         max_width = 0
         curve_chord_max = 0
 
-        if context.scene.prop_plasticity_ui_show_advanced_facet:            
-            if len(context.scene.refacet_presets) > 0: 
+        if context.scene.prop_plasticity_ui_show_advanced_facet:
+            if len(context.scene.refacet_presets) > 0:
                 surface_plane_tolerance = preset.Face_plane_tolerance
                 surface_plane_angle = preset.Face_Angle_tolerance
                 curve_chord_tolerance = preset.Edge_chord_tolerance
@@ -464,8 +474,8 @@ class RefacetButton(bpy.types.Operator):
             else:
                 surface_plane_tolerance = context.scene.prop_plasticity_surface_plane_tolerance
                 surface_plane_angle = context.scene.prop_plasticity_surface_angle_tolerance
-                curve_chord_tolerance = context.scene.prop_plasticity_curve_chord_tolerance            
-                curve_chord_angle = context.scene.prop_plasticity_curve_angle_tolerance                
+                curve_chord_tolerance = context.scene.prop_plasticity_curve_chord_tolerance
+                curve_chord_angle = context.scene.prop_plasticity_curve_angle_tolerance
                 min_width = (
                     context.scene.prop_plasticity_facet_min_width
                     if context.scene.prop_plasticity_facet_min_width_enabled
@@ -493,7 +503,7 @@ class RefacetButton(bpy.types.Operator):
                 shape = FacetShapeType.CONVEX
 
         plasticity_ids_by_filename = {}
-        
+
         for obj in _collect_refacet_target_objects(context):
             if "plasticity_filename" in obj.keys():
                 if obj["plasticity_filename"] not in plasticity_ids_by_filename.keys():
@@ -540,8 +550,10 @@ class PlasticityPanel(bpy.types.Panel):
                 "wm.connect_button", text="Connect")
             box.prop(scene, "prop_plasticity_server", text="Server")
 
-        if plasticity_client.connected:
-            if plasticity_client.filename:
+        # Tabs stay visible without the Plasticity bridge; bridge-only actions
+        # disable themselves via their poll() or the explicit guards below.
+        if True:
+            if plasticity_client.connected and plasticity_client.filename:
                 layout.label(text="Filename: " + plasticity_client.filename)
 
             layout.separator()
@@ -565,7 +577,7 @@ class PlasticityPanel(bpy.types.Panel):
                 "MAIN": "Main",
                 "REFACET": "Refacet",
                 "UTILITIES": "Utilities",
-                "UV_TOOLS": "UV / Material / Texture Tools",
+                "UV_TOOLS": "UV Tools",
                 "MESH_TOOLS": "Mesh Tools",
                 "PREFERENCES": "Preferences",
             }
@@ -574,6 +586,8 @@ class PlasticityPanel(bpy.types.Panel):
             pin_props = (
                 "prop_plasticity_pin_live_link",
                 "prop_plasticity_pin_refresh",
+                "prop_plasticity_pin_preserve_uv_seams",
+                "prop_plasticity_pin_preserve_uvs",
                 "prop_plasticity_pin_only_visible",
                 "prop_plasticity_pin_only_selected",
                 "prop_plasticity_pin_only_new",
@@ -601,9 +615,7 @@ class PlasticityPanel(bpy.types.Panel):
                 "prop_plasticity_pin_live_expand_interval",
                 "prop_plasticity_pin_live_expand_auto_merge_seams",
                 "prop_plasticity_pin_auto_seam_mode",
-                "prop_plasticity_pin_auto_cylinder_seam_mode",
-                "prop_plasticity_pin_auto_cylinder_partial_angle",
-                "prop_plasticity_pin_auto_cylinder_seam_occluded_only",
+                "prop_plasticity_pin_auto_cylinder_seam_facing",
                 "prop_plasticity_pin_relax_uvs",
                 "prop_plasticity_pin_select_adjacent_fillets",
                 "prop_plasticity_pin_select_fillet_min_curvature_angle",
@@ -625,7 +637,6 @@ class PlasticityPanel(bpy.types.Panel):
                 "prop_plasticity_pin_uv_remove_materials",
                 "prop_plasticity_pin_uv_reload_textures",
                 "prop_plasticity_pin_uv_assign_checker",
-                "prop_plasticity_pin_uv_remove_checker",
                 "prop_plasticity_pin_mesh_select_similar",
                 "prop_plasticity_pin_mesh_object_transform_control_mode",
                 "prop_plasticity_pin_mesh_join",
@@ -665,6 +676,24 @@ class PlasticityPanel(bpy.types.Panel):
                     row.operator("wm.list", text="Refresh")
                     row.prop(scene, "prop_plasticity_pin_refresh",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_refresh"), emboss=False)
+                if scene.prop_plasticity_pin_preserve_uv_seams:
+                    row = pin_col.row(align=True)
+                    row.prop(scene, "prop_plasticity_preserve_uv_seams",
+                             text="Preserve UV Seams")
+                    row.prop(scene, "prop_plasticity_pin_preserve_uv_seams",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_preserve_uv_seams"), emboss=False)
+                if scene.prop_plasticity_pin_preserve_uvs:
+                    row = pin_col.row(align=True)
+                    row.prop(scene, "prop_plasticity_preserve_uvs",
+                             text="Preserve UVs")
+                    row.prop(scene, "prop_plasticity_pin_preserve_uvs",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_preserve_uvs"), emboss=False)
+                if scene.prop_plasticity_pin_scale:
+                    row = pin_col.row(align=True)
+                    row.prop(scene, "prop_plasticity_unit_scale",
+                             text="Import Scale")
+                    row.prop(scene, "prop_plasticity_pin_scale",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_scale"), emboss=False)
                 if scene.prop_plasticity_pin_only_visible:
                     row = pin_col.row(align=True)
                     row.prop(scene, "prop_plasticity_list_only_visible",
@@ -685,12 +714,6 @@ class PlasticityPanel(bpy.types.Panel):
                              text="Only new objects in Plasticity")
                     row.prop(scene, "prop_plasticity_pin_only_new",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_only_new"), emboss=False)
-                if scene.prop_plasticity_pin_scale:
-                    row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_unit_scale",
-                             text="Scale", slider=True)
-                    row.prop(scene, "prop_plasticity_pin_scale",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_scale"), emboss=False)
                 if scene.prop_plasticity_pin_send_to_plasticity:
                     row = pin_col.row(align=True)
                     row.operator("wm.send_to_plasticity", text="Send to Plasticity")
@@ -732,7 +755,9 @@ class PlasticityPanel(bpy.types.Panel):
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_refacet_only_selected"), emboss=False)
                 if scene.prop_plasticity_pin_live_refacet:
                     row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_live_refacet", text="Live Refacet")
+                    live_toggle = row.row(align=True)
+                    live_toggle.enabled = plasticity_client.connected
+                    live_toggle.prop(scene, "prop_plasticity_live_refacet", text="Live Refacet")
                     row.prop(scene, "prop_plasticity_pin_live_refacet",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_refacet"), emboss=False)
                 if scene.prop_plasticity_pin_auto_mark_edges:
@@ -790,7 +815,7 @@ class PlasticityPanel(bpy.types.Panel):
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_auto_circle"), emboss=False)
                 if scene.prop_plasticity_pin_live_expand_auto_select_cylinders:
                     row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_live_expand_auto_select_cylinders", text="Auto Select Cylinders (Experimental)")
+                    row.prop(scene, "prop_plasticity_live_expand_auto_select_cylinders", text="Auto Select Cylinders")
                     row.prop(scene, "prop_plasticity_pin_live_expand_auto_select_cylinders",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_auto_select_cylinders"), emboss=False)
                 if scene.prop_plasticity_pin_live_expand_cylinder_min_wrap_angle:
@@ -808,26 +833,29 @@ class PlasticityPanel(bpy.types.Panel):
                     row.prop(scene, "prop_plasticity_live_expand_auto_merge_seams", text="Auto Merge / Reset Seams on Selection")
                     row.prop(scene, "prop_plasticity_pin_live_expand_auto_merge_seams",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_auto_merge_seams"), emboss=False)
+                if scene.prop_plasticity_pin_live_update_mode:
+                    row = pin_col.row(align=True)
+                    row.prop(scene, "prop_plasticity_live_update_mode", text="Live Update")
+                    row.prop(scene, "prop_plasticity_pin_live_update_mode",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_update_mode"), emboss=False)
+                    if scene.prop_plasticity_live_update_mode == 'BOX':
+                        row = pin_col.row(align=True)
+                        row.prop(scene, "prop_plasticity_live_box_project_size", text="Box Project Size")
                 if scene.prop_plasticity_pin_auto_seam_mode:
                     row = pin_col.row(align=True)
                     row.prop(scene, "prop_plasticity_auto_seam_mode", text="Auto Create Seam")
                     row.prop(scene, "prop_plasticity_pin_auto_seam_mode",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_seam_mode"), emboss=False)
-                if scene.prop_plasticity_pin_auto_cylinder_seam_mode:
+                    if scene.prop_plasticity_auto_seam_mode == 'SPHERE_OPEN':
+                        row = pin_col.row(align=True)
+                        row.prop(scene, "prop_plasticity_sphere_cap_size", text="Cap Size")
+                if scene.prop_plasticity_pin_auto_cylinder_seam_facing:
                     row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_seam_mode", text="Cylinder Seam Mode")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_mode",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_mode"), emboss=False)
-                if scene.prop_plasticity_pin_auto_cylinder_partial_angle:
-                    row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_partial_angle", text="Partial Wrap Angle")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_partial_angle",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_partial_angle"), emboss=False)
-                if scene.prop_plasticity_pin_auto_cylinder_seam_occluded_only:
-                    row = pin_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_seam_occluded_only", text="Occluded Only (View)")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_occluded_only",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_occluded_only"), emboss=False)
+                    seam_toggle = row.row(align=True)
+                    seam_toggle.enabled = scene.prop_plasticity_auto_seam_mode == 'CYLINDER'
+                    seam_toggle.prop(scene, "prop_plasticity_auto_cylinder_seam_facing", text="Seam Toward Camera")
+                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_facing",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_facing"), emboss=False)
                 if scene.prop_plasticity_pin_select_adjacent_fillets:
                     row = pin_col.row(align=True)
                     row.prop(scene, "prop_plasticity_select_adjacent_fillets", text="Select Adjacent Fillets")
@@ -922,7 +950,7 @@ class PlasticityPanel(bpy.types.Panel):
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_uvs"), emboss=False)
                 if scene.prop_plasticity_pin_uv_remove_materials:
                     row = pin_col.row(align=True)
-                    row.operator("object.remove_materials", text="Remove Materials")
+                    row.operator("object.remove_materials", text="Remove All Materials")
                     row.prop(scene, "prop_plasticity_pin_uv_remove_materials",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_materials"), emboss=False)
                 if scene.prop_plasticity_pin_uv_reload_textures:
@@ -932,14 +960,10 @@ class PlasticityPanel(bpy.types.Panel):
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_reload_textures"), emboss=False)
                 if scene.prop_plasticity_pin_uv_assign_checker:
                     row = pin_col.row(align=True)
-                    row.operator("object.assign_uv_checker_texture", text="Assign Checker Texture")
+                    row.operator("object.assign_uv_checker_texture", text="Toggle Checker Texture",
+                                 depress=_checker_toggle_depress(context))
                     row.prop(scene, "prop_plasticity_pin_uv_assign_checker",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_assign_checker"), emboss=False)
-                if scene.prop_plasticity_pin_uv_remove_checker:
-                    row = pin_col.row(align=True)
-                    row.operator("object.remove_uv_checker_nodes", text="Remove Checker Material")
-                    row.prop(scene, "prop_plasticity_pin_uv_remove_checker",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_checker"), emboss=False)
                 if scene.prop_plasticity_pin_mesh_select_similar:
                     row = pin_col.row(align=True)
                     row.operator("object.select_similar_geometry", text="Select Similar Geometry")
@@ -1067,11 +1091,26 @@ class PlasticityPanel(bpy.types.Panel):
                          text="Only new objects in Plasticity")
                 row.prop(scene, "prop_plasticity_pin_only_new",
                          text="", icon=_pin_icon(scene, "prop_plasticity_pin_only_new"), emboss=False)
+                preserve_col = box.column(align=True)
+                row = preserve_col.row(align=True)
+                row.prop(scene, "prop_plasticity_preserve_uv_seams",
+                         text="Preserve UV Seams")
+                row.prop(scene, "prop_plasticity_pin_preserve_uv_seams",
+                         text="", icon=_pin_icon(scene, "prop_plasticity_pin_preserve_uv_seams"), emboss=False)
+                row = preserve_col.row(align=True)
+                row.prop(scene, "prop_plasticity_preserve_uvs",
+                         text="Preserve UVs")
+                row.prop(scene, "prop_plasticity_pin_preserve_uvs",
+                         text="", icon=_pin_icon(scene, "prop_plasticity_pin_preserve_uvs"), emboss=False)
                 row = box.row(align=True)
                 row.prop(scene, "prop_plasticity_unit_scale",
-                         text="Scale", slider=True)
+                         text="Import Scale")
                 row.prop(scene, "prop_plasticity_pin_scale",
                          text="", icon=_pin_icon(scene, "prop_plasticity_pin_scale"), emboss=False)
+                preserve_status = context.window_manager.plasticity_uv_preserve_status
+                if preserve_status:
+                    box.operator("plasticity.select_uv_seam_affected",
+                                 icon='RESTRICT_SELECT_OFF')
                 send_box = layout.box()
                 row = send_box.row(align=True)
                 row.operator("wm.send_to_plasticity", text="Send to Plasticity")
@@ -1111,7 +1150,9 @@ class PlasticityPanel(bpy.types.Panel):
                     row.prop(scene, "prop_plasticity_pin_live_refacet_only_selected",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_refacet_only_selected"), emboss=False)
                     row = col.row(align=True)
-                    row.prop(scene, "prop_plasticity_live_refacet", text="Live Refacet")
+                    live_toggle = row.row(align=True)
+                    live_toggle.enabled = plasticity_client.connected
+                    live_toggle.prop(scene, "prop_plasticity_live_refacet", text="Live Refacet")
                     row.prop(scene, "prop_plasticity_pin_live_refacet",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_refacet"), emboss=False)
                     if scene.prop_plasticity_live_refacet:
@@ -1203,7 +1244,7 @@ class PlasticityPanel(bpy.types.Panel):
                         curve_value = curve_box.column()
                         curve_value.enabled = scene.prop_plasticity_curve_max_length_enabled
                         curve_value.prop(scene, "prop_plasticity_curve_max_length", text="")
-    
+
             elif active_tab == "UTILITIES":
                 box = layout.box()
                 col = box.column(align=True)
@@ -1243,27 +1284,28 @@ class PlasticityPanel(bpy.types.Panel):
                     row.prop(scene, "prop_plasticity_pin_live_expand_auto_merge_seams",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_auto_merge_seams"), emboss=False)
                     row = merge_col.row(align=True)
+                    row.prop(scene, "prop_plasticity_live_update_mode",
+                             text="Live Update")
+                    row.prop(scene, "prop_plasticity_pin_live_update_mode",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_update_mode"), emboss=False)
+                    if scene.prop_plasticity_live_update_mode == 'BOX':
+                        merge_col.prop(scene, "prop_plasticity_live_box_project_size",
+                                       text="Box Project Size")
+                    row = merge_col.row(align=True)
                     row.prop(scene, "prop_plasticity_auto_seam_mode",
                              text="Auto Create Seam")
                     row.prop(scene, "prop_plasticity_pin_auto_seam_mode",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_seam_mode"), emboss=False)
-                    cylinder_col = merge_col.column(align=True)
-                    cylinder_col.enabled = scene.prop_plasticity_auto_seam_mode == 'CYLINDER'
-                    row = cylinder_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_seam_mode",
-                             text="Cylinder Seam Mode")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_mode",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_mode"), emboss=False)
-                    row = cylinder_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_partial_angle",
-                             text="Partial Wrap Angle")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_partial_angle",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_partial_angle"), emboss=False)
-                    row = cylinder_col.row(align=True)
-                    row.prop(scene, "prop_plasticity_auto_cylinder_seam_occluded_only",
-                             text="Occluded Only (View)")
-                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_occluded_only",
-                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_occluded_only"), emboss=False)
+                    if scene.prop_plasticity_auto_seam_mode == 'SPHERE_OPEN':
+                        merge_col.prop(scene, "prop_plasticity_sphere_cap_size",
+                                       text="Cap Size")
+                    row = merge_col.row(align=True)
+                    seam_toggle = row.row(align=True)
+                    seam_toggle.enabled = scene.prop_plasticity_auto_seam_mode == 'CYLINDER'
+                    seam_toggle.prop(scene, "prop_plasticity_auto_cylinder_seam_facing",
+                                     text="Seam Toward Camera")
+                    row.prop(scene, "prop_plasticity_pin_auto_cylinder_seam_facing",
+                             text="", icon=_pin_icon(scene, "prop_plasticity_pin_auto_cylinder_seam_facing"), emboss=False)
 
                 faces_box = col.box()
                 faces_box.prop(
@@ -1301,7 +1343,7 @@ class PlasticityPanel(bpy.types.Panel):
                         expand_col.label(text="Live Expand Selection Settings")
                         row = expand_col.row(align=True)
                         row.prop(scene, "prop_plasticity_live_expand_auto_select_cylinders",
-                                 text="Auto Select Cylinders (Experimental)")
+                                 text="Auto Select Cylinders")
                         row.prop(scene, "prop_plasticity_pin_live_expand_auto_select_cylinders",
                                  text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_auto_select_cylinders"), emboss=False)
 
@@ -1423,7 +1465,7 @@ class PlasticityPanel(bpy.types.Panel):
                              text="Plasticity Edge Highlight Color")
                     row.prop(scene, "prop_plasticity_pin_live_expand_overlay_color",
                              text="", icon=_pin_icon(scene, "prop_plasticity_pin_live_expand_overlay_color"), emboss=False)
-    
+
             elif active_tab == "UV_TOOLS":
                 box = layout.box()
                 col = box.column(align=True)
@@ -1458,21 +1500,18 @@ class PlasticityPanel(bpy.types.Panel):
                 row.prop(scene, "prop_plasticity_pin_uv_remove_uvs",
                          text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_uvs"), emboss=False)
                 row = col.row(align=True)
-                row.operator("object.remove_materials", text="Remove Materials")
-                row.prop(scene, "prop_plasticity_pin_uv_remove_materials",
-                         text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_materials"), emboss=False)
-                row = col.row(align=True)
                 row.operator("object.reload_textures", text="Reload Textures")
                 row.prop(scene, "prop_plasticity_pin_uv_reload_textures",
                          text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_reload_textures"), emboss=False)
                 row = col.row(align=True)
-                row.operator("object.assign_uv_checker_texture", text="Assign Checker Texture")
+                row.operator("object.remove_materials", text="Remove All Materials")
+                row.prop(scene, "prop_plasticity_pin_uv_remove_materials",
+                         text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_materials"), emboss=False)
+                row = col.row(align=True)
+                row.operator("object.assign_uv_checker_texture", text="Toggle Checker Texture",
+                             depress=_checker_toggle_depress(context))
                 row.prop(scene, "prop_plasticity_pin_uv_assign_checker",
                          text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_assign_checker"), emboss=False)
-                row = col.row(align=True)
-                row.operator("object.remove_uv_checker_nodes", text="Remove Checker Material")
-                row.prop(scene, "prop_plasticity_pin_uv_remove_checker",
-                         text="", icon=_pin_icon(scene, "prop_plasticity_pin_uv_remove_checker"), emboss=False)
                 checker_col = col.column(align=True)
                 checker_col.prop(scene, "prop_plasticity_checker_source", text="")
                 checker_source = scene.prop_plasticity_checker_source
@@ -1487,7 +1526,7 @@ class PlasticityPanel(bpy.types.Panel):
                     path_label = scene.prop_plasticity_checker_custom_path or "No file selected"
                     row.label(text=path_label)
                     row.operator("object.select_checker_image", text="", icon="FILE_FOLDER")
-    
+
             elif active_tab == "MESH_TOOLS":
                 box = layout.box()
                 col = box.column(align=True)
@@ -1582,7 +1621,7 @@ class PlasticityPanel(bpy.types.Panel):
 
                 uv_box = col.box()
                 uv_col = uv_box.column(align=True)
-                uv_col.label(text="UV / Material / Texture Tools")
+                uv_col.label(text="UV Tools")
                 uv_col.prop(
                     scene,
                     "prop_plasticity_pref_auto_assign_checker_on_select",

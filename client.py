@@ -11,6 +11,7 @@ import numpy as np
 from .libs.websockets import client
 from .libs.websockets.exceptions import (ConnectionClosed, InvalidURI,
                                          WebSocketException)
+from .hierarchy import filter_items_with_ancestors
 
 max_size = 2 ** 32 - 1
 
@@ -66,6 +67,8 @@ class PlasticityClient:
         self.handler.client = self
         self.supported_messages = set()
         self.on_list_complete = None
+        self._visible_hierarchy_pending = False
+        self._visible_item_ids = None
 
     def handshake(self):
         if self.connected:
@@ -92,6 +95,8 @@ class PlasticityClient:
         if self.connected:
             self.report({'INFO'}, "Refreshing available meshes...")
             self.on_list_complete = on_complete
+            self._visible_hierarchy_pending = False
+            self._visible_item_ids = None
 
             future = run_coroutine_threadsafe(
                 self.list_all_async(), self.loop)
@@ -110,6 +115,8 @@ class PlasticityClient:
         if self.connected:
             self.report({'INFO'}, "Refreshing visible meshes...")
             self.on_list_complete = on_complete
+            self._visible_hierarchy_pending = True
+            self._visible_item_ids = None
 
             future = run_coroutine_threadsafe(
                 self.list_visible_async(), self.loop)
@@ -355,6 +362,8 @@ class PlasticityClient:
                 self.server = server
                 self.supported_messages = set()
                 self.on_list_complete = None
+                self._visible_hierarchy_pending = False
+                self._visible_item_ids = None
                 bpy.app.timers.register(self.handler.on_connect, first_interval=0.001)
                 await self.handshake_async()
 
@@ -375,6 +384,8 @@ class PlasticityClient:
                         self.subscribed = False
                         self.supported_messages = set()
                         self.on_list_complete = None
+                        self._visible_hierarchy_pending = False
+                        self._visible_item_ids = None
                         bpy.app.timers.register(self.handler.on_disconnect, first_interval=0.001)
                         break
                     except Exception as e:
@@ -387,6 +398,8 @@ class PlasticityClient:
             self.subscribed = False
             self.supported_messages = set()
             self.on_list_complete = None
+            self._visible_hierarchy_pending = False
+            self._visible_item_ids = None
             bpy.app.timers.register(self.handler.on_disconnect, first_interval=0.001)
         except InvalidURI:
             self.report(
@@ -408,7 +421,7 @@ class PlasticityClient:
         offset += 4
 
         if message_type == MessageType.TRANSACTION_1:
-            self.__on_transaction(view, offset, update_only=True)
+            await self.__on_transaction(view, offset, update_only=True)
 
         elif message_type == MessageType.LIST_ALL_1 or message_type == MessageType.LIST_SOME_1 or message_type == MessageType.LIST_VISIBLE_1:
             message_id = int.from_bytes(view[offset:offset + 4], 'little')
@@ -420,12 +433,19 @@ class PlasticityClient:
             if code != 200:
                 self.report({'ERROR'}, f"List all failed with code: {code}")
                 self.on_list_complete = None
+                self._visible_hierarchy_pending = False
+                self._visible_item_ids = None
                 bpy.app.timers.register(
                     lambda code=code: self.handler.on_list_error(code), first_interval=0.001)
                 return
 
             # NOTE: ListAll only has an Add message inside it so it is a bit unlike a regular transaction
-            self.__on_transaction(view, offset, update_only=False)
+            await self.__on_transaction(
+                view,
+                offset,
+                update_only=False,
+                response_type=message_type,
+            )
 
         elif message_type == MessageType.NEW_VERSION_1:
             filename_length = int.from_bytes(view[offset:offset + 4], 'little')
@@ -467,7 +487,7 @@ class PlasticityClient:
         elif message_type == MessageType.HANDSHAKE_1:
             self.__on_handshake(view, offset)
 
-    def __on_transaction(self, view, offset, update_only):
+    async def __on_transaction(self, view, offset, update_only, response_type=None):
         filename_length = int.from_bytes(view[offset:offset + 4], 'little')
         offset += 4
 
@@ -501,6 +521,28 @@ class PlasticityClient:
             self.on_message_item(
                 view[offset:offset + item_length], transaction)
             offset += item_length
+
+        if not update_only and self._visible_hierarchy_pending:
+            if response_type == MessageType.LIST_VISIBLE_1:
+                mesh_types = {ObjectType.SOLID.value, ObjectType.SHEET.value}
+                self._visible_item_ids = {
+                    item["id"]
+                    for item in transaction["add"] + transaction["update"]
+                    if item.get("type") in mesh_types
+                }
+                await self.list_all_async()
+                return
+
+            if response_type == MessageType.LIST_ALL_1 and self._visible_item_ids is not None:
+                transaction["add"], transaction["update"] = filter_items_with_ancestors(
+                    transaction["add"],
+                    transaction["update"],
+                    self._visible_item_ids,
+                    group_type=ObjectType.GROUP.value,
+                    item_types=(ObjectType.SOLID.value, ObjectType.SHEET.value),
+                )
+                self._visible_hierarchy_pending = False
+                self._visible_item_ids = None
 
         if update_only:
             bpy.app.timers.register(lambda: self.handler.on_transaction(
@@ -735,6 +777,8 @@ class PlasticityClient:
         self.subscribed = False
         self.supported_messages = set()
         self.on_list_complete = None
+        self._visible_hierarchy_pending = False
+        self._visible_item_ids = None
         self.websocket = None
         self.handler.on_disconnect()
         self.report({'INFO'}, "Disconnected from Plasticity server")
