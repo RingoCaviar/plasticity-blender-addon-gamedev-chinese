@@ -8,6 +8,21 @@ _ADDON_KEY = __package__ or "plasticity_blender_addon_gamedev"
 
 # ASCII escapes keep this catalog safe across Windows console encodings.
 _ZH = {
+    'Preserve UV Seams': '\u4fdd\u7559 UV \u7f1d\u5408\u8fb9',
+    'Preserve UVs': '\u4fdd\u7559 UV',
+    'Only new objects in Plasticity': '\u4ec5\u5bfc\u5165 Plasticity \u4e2d\u7684\u65b0\u5bf9\u8c61',
+    'Box Project': '\u76d2\u6295\u5f71',
+    'Box Project Size': '\u76d2\u6295\u5f71\u5927\u5c0f',
+    'Seam Toward Camera': '\u7f1d\u5408\u8fb9\u671d\u5411\u76f8\u673a',
+    'Toggle Checker Texture': '\u5207\u6362\u68c0\u67e5\u7eb9\u7406',
+    'Checker Textures Library': '\u68c0\u67e5\u7eb9\u7406\u5e93',
+    'Auto Assign Checker on Selection': '\u9009\u62e9\u65f6\u81ea\u52a8\u5206\u914d\u68c0\u67e5\u7eb9\u7406',
+    'Preserve Existing Seams': '\u4fdd\u7559\u73b0\u6709\u7f1d\u5408\u8fb9',
+    'Unwrap Method': '\u5c55\u5f00\u65b9\u5f0f',
+    'Aligned': '\u5bf9\u9f50',
+    'Cardinal': '\u57fa\u6570\u65b9\u5411',
+    'Maximum Coverage': '\u6700\u5927\u8986\u76d6\u7387',
+    'Sphere Cap / Opening': '\u7403\u5f62\u5e3d / \u5f00\u53e3',
     'Plasticity Blender Addon Gamedev': 'Plasticity Blender \u6e38\u620f\u5f00\u53d1\u7248',
     'Game development focused fork of the Plasticity Blender add-on.': '\u9762\u5411\u6e38\u620f\u5f00\u53d1\u6d41\u7a0b\u7684 Plasticity Blender \u63d2\u4ef6\u5206\u652f\u3002',
     'Plasticity GameDev': 'Plasticity \u6e38\u620f\u5f00\u53d1\u7248',

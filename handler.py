@@ -8,6 +8,9 @@ import bpy
 import mathutils
 import numpy as np
 
+from . import uv_preserve
+from .hierarchy import filter_items_with_ancestors
+
 
 _PIVOT_IMPORT_BASIS_KEY = "plasticity_blender_import_basis_matrix"
 _PIVOT_PIVOT_BASIS_KEY = "plasticity_blender_pivot_basis_matrix"
@@ -704,6 +707,7 @@ class SceneHandler:
         self.__pivot_suppress_object(obj)
         verts, normals, compensation = self.__pivot_prepare_import_geometry(obj, verts, normals, scene=scene)
 
+        seam_state = uv_preserve.capture_before_update(obj)
         mesh = obj.data
         mesh.clear_geometry()
 
@@ -722,6 +726,7 @@ class SceneHandler:
         assert isinstance(face_ids, list)
         _apply_plasticity_groups_and_normals(
             mesh, indices, normals, groups, face_ids)
+        uv_preserve.restore_after_update(obj, seam_state)
 
         self.__pivot_apply_rebuild_state(obj, compensation=compensation)
         self.update_pivot(obj)
@@ -752,6 +757,7 @@ class SceneHandler:
             self.__pivot_resolve_pending_state(obj, scene=scene)
         self.__pivot_suppress_object(obj)
         verts, normals, compensation = self.__pivot_prepare_import_geometry(obj, verts, normals, scene=scene)
+        seam_state = uv_preserve.capture_before_update(obj)
         mesh = obj.data
         mesh.clear_geometry()
 
@@ -790,6 +796,7 @@ class SceneHandler:
         assert isinstance(face_ids, list)
         _apply_plasticity_groups_and_normals(
             mesh, indices, normals, groups, face_ids)
+        uv_preserve.restore_after_update(obj, seam_state)
 
         self.__pivot_apply_rebuild_state(obj, compensation=compensation)
         self.update_pivot(obj)
@@ -1229,8 +1236,8 @@ class SceneHandler:
             inbox_collection = self.__prepare(filename)
 
             filter_ids = self.list_filter_ids
-            selected_only = bool(filter_ids)
-            if filter_ids:
+            selected_only = filter_ids is not None
+            if selected_only:
                 filter_ids = set(filter_ids)
 
             add_items = message.get("add", [])
@@ -1261,14 +1268,13 @@ class SceneHandler:
                         all_items.add(item["id"])
 
                 if selected_only:
-                    filtered_add = [
-                        item for item in add_items
-                        if item["type"] == ObjectType.GROUP.value or item["id"] in filter_ids
-                    ]
-                    filtered_update = [
-                        item for item in update_items
-                        if item["type"] == ObjectType.GROUP.value or item["id"] in filter_ids
-                    ]
+                    filtered_add, filtered_update = filter_items_with_ancestors(
+                        add_items,
+                        update_items,
+                        filter_ids,
+                        group_type=ObjectType.GROUP.value,
+                        item_types=(ObjectType.SOLID.value, ObjectType.SHEET.value),
+                    )
                 else:
                     filtered_add = add_items
                     filtered_update = update_items
@@ -1281,12 +1287,10 @@ class SceneHandler:
                 except Exception:
                     pass
 
-                if filtered_add:
+                filtered_items = filtered_add + filtered_update
+                if filtered_items:
                     self.__replace_objects(filename, inbox_collection,
-                                           version, filtered_add)
-                if filtered_update:
-                    self.__replace_objects(filename, inbox_collection,
-                                           version, filtered_update)
+                                           version, filtered_items)
 
                 if selected_only:
                     for plasticity_id in filter_ids:

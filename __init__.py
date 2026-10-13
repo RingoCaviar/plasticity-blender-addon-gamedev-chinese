@@ -2,11 +2,17 @@ bl_info = {
     "name": "Plasticity Blender Addon Gamedev",
     "description": "Game development focused fork of the Plasticity Blender add-on.",
     "author": "Nick Kallen, User129863",
-    "version": (1, 3, 2),
+    "version": (1, 4, 1),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > Plasticity",
     "category": "Object",
 }
+
+# Purge cached submodules so Blender's Reload Scripts picks up updated code;
+# no-op on a fresh Blender start.
+import sys as _sys
+for _stale in [_n for _n in list(_sys.modules) if _n.startswith(__name__ + ".")]:
+    del _sys.modules[_stale]
 
 import bpy
 import bmesh
@@ -15,7 +21,7 @@ import os
 import bpy.app.handlers
 
 from bpy.app.handlers import persistent
-from . import operators, translations, ui
+from . import operators, translations, ui, uv_preserve
 from .client import PlasticityClient
 from .handler import SceneHandler
 
@@ -68,6 +74,7 @@ def load_presets(dummy):
 
     # Keep runtime behavior in sync with persisted scene toggles, even when
     # there is no preset file.
+    _sync_live_update_mode_toggles(scene)
     _initialize_checker_scene(scene)
     _sync_live_expand_runtime(bpy.context)
     _sync_live_paint_runtime(bpy.context)
@@ -319,6 +326,10 @@ def _on_plasticity_pivot_update(scene, depsgraph):
         handler.process_pivot_depsgraph_updates(depsgraph)
     except Exception:
         pass
+    try:
+        operators.heal_live_timers()
+    except Exception:
+        pass
 
 
 def update_object_transform_control_mode(self, context):
@@ -392,7 +403,7 @@ def _run_checker_auto_assign_timer():
             return None
         if not operators.AssignUVCheckerTextureOperator.poll(context):
             return None
-        bpy.ops.object.assign_uv_checker_texture("EXEC_DEFAULT")
+        bpy.ops.object.assign_uv_checker_texture("EXEC_DEFAULT", action='ASSIGN')
     except Exception:
         return None
     return None
@@ -579,8 +590,8 @@ class RefacetPreset(bpy.types.PropertyGroup):
         subtype='FACTOR',
         update=update_density_preset,
     )
-    tolerance: bpy.props.FloatProperty(name="Tolerance", default=0.01, min=0.0001, max=0.1, step=0.001, precision=6, update=update_and_save_preset)
-    angle: bpy.props.FloatProperty(name="Angle", default=0.45, min=0.1, max=1.0, update=update_and_save_preset)
+    tolerance: bpy.props.FloatProperty(name="Tolerance", default=0.01, min=0.000001, max=0.1, step=0.001, precision=6, update=update_and_save_preset)
+    angle: bpy.props.FloatProperty(name="Angle", default=0.45, min=0.01, max=1.0, update=update_and_save_preset)
     facet_tri_or_ngon: bpy.props.EnumProperty(
         items=[
             ('TRI', "Tri", "Triangles only"),
@@ -605,10 +616,10 @@ class RefacetPreset(bpy.types.PropertyGroup):
         default=False,
         update=update_and_save_preset,
     )
-    Edge_chord_tolerance: bpy.props.FloatProperty(name="Edge chord tolerance", default=0.01, min=0.0001, step=0.01, max=1.0, precision=6, update=update_and_save_preset)
-    Edge_Angle_tolerance: bpy.props.FloatProperty(name="Edge Angle tolerance", default=0.45, min=0.1, max=1.0, update=update_and_save_preset)
-    Face_plane_tolerance: bpy.props.FloatProperty(name="Face plane tolerance", default=0.01, min=0.0001, step=0.01, max=1.0, precision=6, update=update_and_save_preset)
-    Face_Angle_tolerance: bpy.props.FloatProperty(name="Face Angle tolerance", default=0.45, min=0.1, max=1.0, update=update_and_save_preset)
+    Edge_chord_tolerance: bpy.props.FloatProperty(name="Edge chord tolerance", default=0.01, min=0.000001, step=0.01, max=1.0, precision=6, update=update_and_save_preset)
+    Edge_Angle_tolerance: bpy.props.FloatProperty(name="Edge Angle tolerance", default=0.45, min=0.01, max=1.0, update=update_and_save_preset)
+    Face_plane_tolerance: bpy.props.FloatProperty(name="Face plane tolerance", default=0.01, min=0.000001, step=0.01, max=1.0, precision=6, update=update_and_save_preset)
+    Face_Angle_tolerance: bpy.props.FloatProperty(name="Face Angle tolerance", default=0.45, min=0.01, max=1.0, update=update_and_save_preset)
     plane_angle: bpy.props.FloatProperty(
         name="Plane Angle",
         default=0.1,
@@ -690,9 +701,77 @@ class RemoveRefacetPresetOperator(bpy.types.Operator):
 def select_similar(self, context):
     self.layout.operator(operators.SelectByFaceIDOperator.bl_idname)
 
+def _sync_live_update_mode_toggles(scene):
+    """The Live Update dropdown owns Blender's Live Unwrap toggles.
+
+    UNWRAP turns them on so Blender's native behaviors (manual seam marks,
+    the edge-path tool) stay live and consistent; BOX/OFF turns them off
+    so the native solver can never fire behind the add-on's back.
+    """
+    if scene is None:
+        return
+    enable = str(getattr(scene, "prop_plasticity_live_update_mode",
+                         "UNWRAP")) == 'UNWRAP'
+    try:
+        tool_settings = scene.tool_settings
+        if hasattr(tool_settings, "use_live_unwrap"):
+            tool_settings.use_live_unwrap = enable
+        if hasattr(tool_settings, "use_edge_path_live_unwrap"):
+            tool_settings.use_edge_path_live_unwrap = enable
+    except Exception:
+        pass
+    try:
+        window_manager = bpy.context.window_manager
+        for window in window_manager.windows:
+            screen = window.screen
+            if screen is None:
+                continue
+            for area in screen.areas:
+                for space in area.spaces:
+                    if space.type != "IMAGE_EDITOR":
+                        continue
+                    uv_editor = getattr(space, "uv_editor", None)
+                    if uv_editor is not None and hasattr(uv_editor, "use_live_unwrap"):
+                        uv_editor.use_live_unwrap = enable
+    except Exception:
+        pass
+
+
+_seam_region_keymaps = []
+
+
+def _register_seam_region_keymap():
+    """Alt+Click (Edit Mesh) selects a seam-bound region while Live Expand
+    is on; the operator's poll lets the event fall through to Blender's
+    loop select otherwise."""
+    window_manager = bpy.context.window_manager
+    keyconfig = getattr(window_manager.keyconfigs, "addon", None)
+    if keyconfig is None:
+        return
+    keymap = keyconfig.keymaps.new(name="Mesh", space_type='EMPTY')
+    item = keymap.keymap_items.new(
+        "plasticity.select_seam_bound_region", 'LEFTMOUSE', 'PRESS', alt=True)
+    item.properties.deselect = False
+    _seam_region_keymaps.append((keymap, item))
+    item = keymap.keymap_items.new(
+        "plasticity.select_seam_bound_region", 'LEFTMOUSE', 'PRESS',
+        alt=True, ctrl=True)
+    item.properties.deselect = True
+    _seam_region_keymaps.append((keymap, item))
+
+
+def _unregister_seam_region_keymap():
+    for keymap, item in _seam_region_keymaps:
+        try:
+            keymap.keymap_items.remove(item)
+        except Exception:
+            pass
+    _seam_region_keymaps.clear()
+
+
 def register():
-    print("Registering Plasticity client")
     translations.register()
+    print("Registering Plasticity client")
     bpy.utils.register_class(ui.ConnectButton)
     bpy.utils.register_class(ui.DisconnectButton)
     bpy.utils.register_class(ui.ListButton)
@@ -707,14 +786,19 @@ def register():
     bpy.utils.register_class(AddRefacetPresetOperator)
     bpy.utils.register_class(RemoveRefacetPresetOperator)
 
+    uv_preserve.register()
     bpy.utils.register_class(ui.PlasticityPanel)
     bpy.utils.register_class(operators.SelectByFaceIDOperator)
     bpy.utils.register_class(operators.SelectByFaceIDEdgeOperator)
     bpy.utils.register_class(operators.AutoMarkEdgesOperator)
     bpy.utils.register_class(operators.MergeUVSeams)
+    bpy.utils.register_class(operators.SelectSeamBoundRegionOperator)
+    _register_seam_region_keymap()
     bpy.utils.register_class(operators.RelaxUVsPlasticityOperator)
     bpy.utils.register_class(operators.AutoUnwrapPlasticityOperator)
     bpy.utils.register_class(operators.PackUVIslandsPlasticityOperator)
+    bpy.utils.register_class(operators.AutoUnwrapAxisPlasticityOperator)
+    bpy.utils.register_class(operators.UVHealthCheckPlasticityOperator)
     bpy.utils.register_class(operators.PaintPlasticityFacesOperator)
     bpy.utils.register_class(operators.CapturePlasticityFaceMaterialMappingOperator)
     bpy.utils.register_class(operators.ReapplyPlasticityFaceMaterialMappingOperator)
@@ -728,7 +812,6 @@ def register():
     bpy.utils.register_class(operators.MaterialRemover)
     bpy.utils.register_class(operators.AssignUVCheckerTextureOperator)
     bpy.utils.register_class(operators.SelectCheckerImageOperator)
-    bpy.utils.register_class(operators.RemoveUVCheckerNodesOperator)
     bpy.utils.register_class(operators.TextureReloader)
     bpy.utils.register_class(operators.ImportFBXOperator)
     bpy.utils.register_class(operators.ExportFBXOperator)
@@ -746,8 +829,8 @@ def register():
     bpy.types.VIEW3D_MT_edit_mesh_select_similar.append(select_similar)
 
     bpy.types.Scene.prop_plasticity_server = bpy.props.StringProperty(name="Server", default="localhost:8980")
-    bpy.types.Scene.prop_plasticity_facet_tolerance = bpy.props.FloatProperty(name="Tolerance", default=0.01, min=0.0001, max=0.1, step=0.001, precision=6)
-    bpy.types.Scene.prop_plasticity_facet_angle = bpy.props.FloatProperty(name="Angle", default=0.45, min=0.1, max=1.0)
+    bpy.types.Scene.prop_plasticity_facet_tolerance = bpy.props.FloatProperty(name="Tolerance", default=0.01, min=0.000001, max=0.1, step=0.001, precision=6)
+    bpy.types.Scene.prop_plasticity_facet_angle = bpy.props.FloatProperty(name="Angle", default=0.45, min=0.01, max=1.0)
     bpy.types.Scene.prop_plasticity_facet_density = bpy.props.FloatProperty(
         name="Density",
         default=0.01,
@@ -843,8 +926,8 @@ def register():
         update=update_live_expand_auto_circle,
     )
     bpy.types.Scene.prop_plasticity_live_expand_auto_select_cylinders = bpy.props.BoolProperty(
-        name="Auto Select Cylinders (Experimental)",
-        description="Expand selection to connected cylindrical side surfaces. Automatically excludes caps and fillets.",
+        name="Auto Select Cylinders",
+        description="Expand selection to connected cylinder or rounded-slot walls, excluding caps and transition fillets.",
         default=False,
     )
     bpy.types.Scene.prop_plasticity_live_expand_cylinder_min_wrap_angle = bpy.props.FloatProperty(
@@ -897,34 +980,29 @@ def register():
         items=[
             ('OFF', "Off", "Do not auto-create seams"),
             ('CYLINDER', "Cylinder", "Create a seam for cylindrical selections"),
-            # Temporarily hidden: quality is not production-ready yet.
-            # ('SPHERE', "Sphere", "Create a meridian seam for closed spheres"),
-            # ('SPHERE_CAP', "Sphere + Polar Cap", "Create a meridian seam plus a polar/rim seam"),
-            ('SPHERE_OPEN', "Sphere + Open Cap", "Create a meridian seam plus an open rim seam"),
+            ('SPHERE_OPEN', "Sphere Cap / Opening",
+             "Equal-area polar unwrap for spherical caps and spheres with "
+             "an opening — uniform texel density, no relax needed. The rim "
+             "is the island border (closed caps get their rim seamed)"),
         ],
         default='CYLINDER',
     )
-    bpy.types.Scene.prop_plasticity_auto_cylinder_seam_mode = bpy.props.EnumProperty(
-        name="Cylinder Seam Mode",
-        description="When to insert a cylinder seam",
-        items=[
-            ('FULL', "Full Only", "Only insert a seam on fully wrapped cylinders"),
-            ('PARTIAL', "Partial + Full", "Also insert seams on large partial wraps"),
-        ],
-        default='FULL',
+    bpy.types.Scene.prop_plasticity_sphere_cap_size = bpy.props.FloatProperty(
+        name="Cap Size",
+        description=(
+            "How far up from the bottom pole the cap disc reaches (degrees) "
+            "when a deep sphere is split into cap + band. Bigger caps give "
+            "a shorter band and measure slightly more even results"
+        ),
+        default=65.0,
+        min=10.0,
+        max=95.0,
+        step=100,
+        precision=0,
     )
-    bpy.types.Scene.prop_plasticity_auto_cylinder_partial_angle = bpy.props.FloatProperty(
-        name="Partial Wrap Angle",
-        description="Minimum wrap angle (degrees) to insert a seam on partial cylinders",
-        default=200.0,
-        min=90.0,
-        max=360.0,
-        step=1.0,
-        precision=1,
-    )
-    bpy.types.Scene.prop_plasticity_auto_cylinder_seam_occluded_only = bpy.props.BoolProperty(
-        name="Occluded Only (View)",
-        description="Only place auto cylinder seams on edges occluded from the active 3D view",
+    bpy.types.Scene.prop_plasticity_auto_cylinder_seam_facing = bpy.props.BoolProperty(
+        name="Seam Toward Camera",
+        description="Place the cylinder seam on the side of the tube that faces the 3D view",
         default=False,
     )
     bpy.types.Scene.prop_plasticity_live_expand_edge_thickness = bpy.props.FloatProperty(
@@ -987,7 +1065,7 @@ def register():
             ("MAIN", "Main", "Connection, live link, refresh, filters, scale"),
             ("REFACET", "Refacet", "Refacet, presets, density/tolerance, live refacet"),
             ("UTILITIES", "Utilities", "Selection, marking, and paint utilities"),
-            ("UV_TOOLS", "UV / Material / Texture Tools", "Unwrap, UV editor, UVs, materials, textures"),
+            ("UV_TOOLS", "UV Tools", "Unwrap, UV editing, packing, and checker textures"),
             ("MESH_TOOLS", "Mesh Tools", "Selection, joins, merge, mirror, modifiers, import/export"),
             ("PREFERENCES", "Preferences", "General add-on behavior and workflow options"),
         ],
@@ -1060,6 +1138,8 @@ def register():
     )
     bpy.types.Scene.prop_plasticity_pin_live_link = bpy.props.BoolProperty(name="Pin Live Link", default=False)
     bpy.types.Scene.prop_plasticity_pin_refresh = bpy.props.BoolProperty(name="Pin Refresh", default=False)
+    bpy.types.Scene.prop_plasticity_pin_preserve_uv_seams = bpy.props.BoolProperty(name="Pin Preserve UV Seams", default=False)
+    bpy.types.Scene.prop_plasticity_pin_preserve_uvs = bpy.props.BoolProperty(name="Pin Preserve UVs", default=False)
     bpy.types.Scene.prop_plasticity_pin_only_visible = bpy.props.BoolProperty(name="Pin Only Visible", default=False)
     bpy.types.Scene.prop_plasticity_pin_only_selected = bpy.props.BoolProperty(name="Pin Only Selected", default=False)
     bpy.types.Scene.prop_plasticity_pin_only_new = bpy.props.BoolProperty(name="Pin Only New", default=False)
@@ -1081,15 +1161,37 @@ def register():
     bpy.types.Scene.prop_plasticity_pin_paint_faces_attribute_name = bpy.props.BoolProperty(name="Pin Paint Faces Color Attribute", default=False)
     bpy.types.Scene.prop_plasticity_pin_live_paint_faces = bpy.props.BoolProperty(name="Pin Live Paint Faces", default=False)
     bpy.types.Scene.prop_plasticity_pin_live_expand = bpy.props.BoolProperty(name="Pin Live Expand Selection", default=True)
+    bpy.types.Scene.prop_plasticity_live_update_mode = bpy.props.EnumProperty(
+        name="Live Update",
+        description="How UVs update live after merges and seam edits "
+                    "(this dropdown is the only switch; Blender's Live "
+                    "Unwrap toggles are managed automatically)",
+        items=[
+            ('UNWRAP', "Unwrap",
+             "Re-unwrap the affected region live, using your last Unwrap "
+             "settings"),
+            ('BOX', "Box Project",
+             "Re-apply a cube projection to the affected region — keeps "
+             "world-aligned, projection-based UVs intact through merges"),
+            ('OFF', "Off",
+             "Never touch UVs on merges; seams only"),
+        ],
+        default='UNWRAP',
+        update=lambda self, context: _sync_live_update_mode_toggles(self))
+    bpy.types.Scene.prop_plasticity_live_box_project_size = bpy.props.FloatProperty(
+        name="Box Project Size",
+        description="Cube size for the live Box Project mode — use the "
+                    "same size as your initial Cube Projection so texel "
+                    "density matches",
+        default=1.0, min=0.0001, max=1000.0, precision=4)
+    bpy.types.Scene.prop_plasticity_pin_live_update_mode = bpy.props.BoolProperty(name="Pin Live Update Mode", default=False)
     bpy.types.Scene.prop_plasticity_pin_live_expand_auto_circle = bpy.props.BoolProperty(name="Pin Auto Circle Select Mode", default=True)
     bpy.types.Scene.prop_plasticity_pin_live_expand_auto_select_cylinders = bpy.props.BoolProperty(name="Pin Auto Select Cylinders", default=True)
     bpy.types.Scene.prop_plasticity_pin_live_expand_cylinder_min_wrap_angle = bpy.props.BoolProperty(name="Pin Cylinder Min Wrap Angle", default=True)
     bpy.types.Scene.prop_plasticity_pin_live_expand_interval = bpy.props.BoolProperty(name="Pin Update Interval", default=False)
     bpy.types.Scene.prop_plasticity_pin_live_expand_auto_merge_seams = bpy.props.BoolProperty(name="Pin Auto Merge Seams", default=True)
     bpy.types.Scene.prop_plasticity_pin_auto_seam_mode = bpy.props.BoolProperty(name="Pin Auto Create Seam", default=True)
-    bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_mode = bpy.props.BoolProperty(name="Pin Cylinder Seam Mode", default=False)
-    bpy.types.Scene.prop_plasticity_pin_auto_cylinder_partial_angle = bpy.props.BoolProperty(name="Pin Partial Wrap Angle", default=False)
-    bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_occluded_only = bpy.props.BoolProperty(name="Pin Occluded Only", default=False)
+    bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_facing = bpy.props.BoolProperty(name="Pin Seam Toward Camera", default=False)
     bpy.types.Scene.prop_plasticity_pin_relax_uvs = bpy.props.BoolProperty(name="Pin Relax UVs", default=True)
     bpy.types.Scene.prop_plasticity_pin_select_adjacent_fillets = bpy.props.BoolProperty(name="Pin Select Adjacent Fillets", default=False)
     bpy.types.Scene.prop_plasticity_pin_select_fillet_min_curvature_angle = bpy.props.BoolProperty(name="Pin Min Curvature Angle", default=False)
@@ -1104,6 +1206,8 @@ def register():
     bpy.types.Scene.prop_plasticity_pin_live_expand_overlay_color = bpy.props.BoolProperty(name="Pin Edge Highlight Color", default=False)
     bpy.types.Scene.prop_plasticity_pin_uv_unwrap = bpy.props.BoolProperty(name="Pin Unwrap", default=True)
     bpy.types.Scene.prop_plasticity_pin_uv_pack_islands = bpy.props.BoolProperty(name="Pin Pack UV Islands", default=True)
+    bpy.types.Scene.prop_plasticity_pin_uv_health_check = bpy.props.BoolProperty(name="Pin UV Health Check", default=False)
+    bpy.types.Scene.prop_plasticity_pin_uv_auto_unwrap_axis = bpy.props.BoolProperty(name="Pin Auto Unwrap Axis", default=False)
     bpy.types.Scene.prop_plasticity_pin_uv_open_editor = bpy.props.BoolProperty(name="Pin Open UV Editor", default=True)
     bpy.types.Scene.prop_plasticity_pin_uv_close_editor = bpy.props.BoolProperty(name="Pin Close UV Editor", default=False)
     bpy.types.Scene.prop_plasticity_pin_uv_select_without_uvs = bpy.props.BoolProperty(name="Pin Select Objects Without UVs", default=False)
@@ -1111,7 +1215,6 @@ def register():
     bpy.types.Scene.prop_plasticity_pin_uv_remove_materials = bpy.props.BoolProperty(name="Pin Remove Materials", default=False)
     bpy.types.Scene.prop_plasticity_pin_uv_reload_textures = bpy.props.BoolProperty(name="Pin Reload Textures", default=False)
     bpy.types.Scene.prop_plasticity_pin_uv_assign_checker = bpy.props.BoolProperty(name="Pin Assign Checker", default=True)
-    bpy.types.Scene.prop_plasticity_pin_uv_remove_checker = bpy.props.BoolProperty(name="Pin Remove Checker Material", default=False)
     bpy.types.Scene.prop_plasticity_pin_mesh_select_similar = bpy.props.BoolProperty(name="Pin Select Similar Geometry", default=True)
     bpy.types.Scene.prop_plasticity_pin_mesh_object_transform_control_mode = bpy.props.BoolProperty(name="Pin Object Transform Control Mode", default=False)
     bpy.types.Scene.prop_plasticity_pin_mesh_join = bpy.props.BoolProperty(name="Pin Join Selected", default=False)
@@ -1180,10 +1283,10 @@ def register():
         default=False,
     )
     bpy.types.Scene.prop_plasticity_unit_scale = bpy.props.FloatProperty(name="Unit Scale", default=1.0, min=0.0001, max=1000.0)
-    bpy.types.Scene.prop_plasticity_curve_chord_tolerance = bpy.props.FloatProperty(name="Edge chord tolerance", default=0.01, min=0.0001, step=0.01, max=1.0, precision=6)
-    bpy.types.Scene.prop_plasticity_curve_angle_tolerance = bpy.props.FloatProperty(name="Edge Angle tolerance", default=0.45, min=0.1, max=1.0)
-    bpy.types.Scene.prop_plasticity_surface_plane_tolerance = bpy.props.FloatProperty(name="Face plane tolerance", default=0.01, min=0.0001, step=0.01, max=1.0, precision=6)
-    bpy.types.Scene.prop_plasticity_surface_angle_tolerance = bpy.props.FloatProperty(name="Face Angle tolerance", default=0.45, min=0.1, max=1.0)
+    bpy.types.Scene.prop_plasticity_curve_chord_tolerance = bpy.props.FloatProperty(name="Edge chord tolerance", default=0.01, min=0.000001, step=0.01, max=1.0, precision=6)
+    bpy.types.Scene.prop_plasticity_curve_angle_tolerance = bpy.props.FloatProperty(name="Edge Angle tolerance", default=0.45, min=0.01, max=1.0)
+    bpy.types.Scene.prop_plasticity_surface_plane_tolerance = bpy.props.FloatProperty(name="Face plane tolerance", default=0.01, min=0.000001, step=0.01, max=1.0, precision=6)
+    bpy.types.Scene.prop_plasticity_surface_angle_tolerance = bpy.props.FloatProperty(name="Face Angle tolerance", default=0.45, min=0.01, max=1.0)
     bpy.types.Scene.prop_plasticity_plane_angle = bpy.props.FloatProperty(
         name="Plane Angle",
         default=0.1,
@@ -1271,8 +1374,8 @@ def register():
     print("Plasticity client registered")
 
 def unregister():
-    print("Unregistering Plasticity client")
     translations.unregister()
+    print("Unregistering Plasticity client")
     global _CHECKER_INIT_SCHEDULED
     global _LIVE_EXPAND_SYNC_SCHEDULED, _LIVE_EXPAND_SYNC_RETRIES_LEFT
     if _CHECKER_INIT_SCHEDULED:
@@ -1294,6 +1397,7 @@ def unregister():
     operators.stop_live_expand_overlay()
 
     bpy.utils.unregister_class(ui.PlasticityPanel)
+    uv_preserve.unregister()
     bpy.utils.unregister_class(ui.DisconnectButton)
     bpy.utils.unregister_class(ui.ConnectButton)
     bpy.utils.unregister_class(ui.ListButton)
@@ -1311,9 +1415,13 @@ def unregister():
     bpy.utils.unregister_class(operators.SelectByFaceIDOperator)
     bpy.utils.unregister_class(operators.SelectByFaceIDEdgeOperator)
     bpy.utils.unregister_class(operators.AutoMarkEdgesOperator)
+    _unregister_seam_region_keymap()
+    bpy.utils.unregister_class(operators.SelectSeamBoundRegionOperator)
     bpy.utils.unregister_class(operators.MergeUVSeams)
     bpy.utils.unregister_class(operators.RelaxUVsPlasticityOperator)
     bpy.utils.unregister_class(operators.AutoUnwrapPlasticityOperator)
+    bpy.utils.unregister_class(operators.UVHealthCheckPlasticityOperator)
+    bpy.utils.unregister_class(operators.AutoUnwrapAxisPlasticityOperator)
     bpy.utils.unregister_class(operators.PackUVIslandsPlasticityOperator)
     bpy.utils.unregister_class(operators.ClearPlasticityFaceMaterialMappingOperator)
     bpy.utils.unregister_class(operators.ReapplyPlasticityFaceMaterialMappingOperator)
@@ -1328,7 +1436,6 @@ def unregister():
     bpy.utils.unregister_class(operators.MaterialRemover)
     bpy.utils.unregister_class(operators.AssignUVCheckerTextureOperator)
     bpy.utils.unregister_class(operators.SelectCheckerImageOperator)
-    bpy.utils.unregister_class(operators.RemoveUVCheckerNodesOperator)
     bpy.utils.unregister_class(operators.TextureReloader)
     bpy.utils.unregister_class(operators.ImportFBXOperator)
     bpy.utils.unregister_class(operators.ExportFBXOperator)
@@ -1374,9 +1481,8 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_live_expand_interval
     del bpy.types.Scene.prop_plasticity_live_expand_auto_merge_seams
     del bpy.types.Scene.prop_plasticity_auto_seam_mode
-    del bpy.types.Scene.prop_plasticity_auto_cylinder_seam_mode
-    del bpy.types.Scene.prop_plasticity_auto_cylinder_partial_angle
-    del bpy.types.Scene.prop_plasticity_auto_cylinder_seam_occluded_only
+    del bpy.types.Scene.prop_plasticity_sphere_cap_size
+    del bpy.types.Scene.prop_plasticity_auto_cylinder_seam_facing
     del bpy.types.Scene.prop_plasticity_live_expand_edge_thickness
     del bpy.types.Scene.prop_plasticity_live_expand_edge_occlude
     del bpy.types.Scene.prop_plasticity_live_expand_overlay_color
@@ -1408,6 +1514,8 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_object_transform_control_mode
     del bpy.types.Scene.prop_plasticity_pin_live_link
     del bpy.types.Scene.prop_plasticity_pin_refresh
+    del bpy.types.Scene.prop_plasticity_pin_preserve_uv_seams
+    del bpy.types.Scene.prop_plasticity_pin_preserve_uvs
     del bpy.types.Scene.prop_plasticity_pin_only_visible
     del bpy.types.Scene.prop_plasticity_pin_only_selected
     del bpy.types.Scene.prop_plasticity_pin_only_new
@@ -1428,6 +1536,9 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_pin_paint_faces_mode
     del bpy.types.Scene.prop_plasticity_pin_paint_faces_attribute_name
     del bpy.types.Scene.prop_plasticity_pin_live_paint_faces
+    del bpy.types.Scene.prop_plasticity_pin_live_update_mode
+    del bpy.types.Scene.prop_plasticity_live_box_project_size
+    del bpy.types.Scene.prop_plasticity_live_update_mode
     del bpy.types.Scene.prop_plasticity_pin_live_expand
     del bpy.types.Scene.prop_plasticity_pin_live_expand_auto_circle
     del bpy.types.Scene.prop_plasticity_pin_live_expand_auto_select_cylinders
@@ -1435,9 +1546,7 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_pin_live_expand_interval
     del bpy.types.Scene.prop_plasticity_pin_live_expand_auto_merge_seams
     del bpy.types.Scene.prop_plasticity_pin_auto_seam_mode
-    del bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_mode
-    del bpy.types.Scene.prop_plasticity_pin_auto_cylinder_partial_angle
-    del bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_occluded_only
+    del bpy.types.Scene.prop_plasticity_pin_auto_cylinder_seam_facing
     del bpy.types.Scene.prop_plasticity_pin_relax_uvs
     del bpy.types.Scene.prop_plasticity_pin_select_adjacent_fillets
     del bpy.types.Scene.prop_plasticity_pin_select_fillet_min_curvature_angle
@@ -1452,6 +1561,8 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_pin_live_expand_overlay_color
     del bpy.types.Scene.prop_plasticity_pin_uv_unwrap
     del bpy.types.Scene.prop_plasticity_pin_uv_pack_islands
+    del bpy.types.Scene.prop_plasticity_pin_uv_health_check
+    del bpy.types.Scene.prop_plasticity_pin_uv_auto_unwrap_axis
     del bpy.types.Scene.prop_plasticity_pin_uv_open_editor
     del bpy.types.Scene.prop_plasticity_pin_uv_close_editor
     del bpy.types.Scene.prop_plasticity_pin_uv_select_without_uvs
@@ -1459,7 +1570,6 @@ def unregister():
     del bpy.types.Scene.prop_plasticity_pin_uv_remove_materials
     del bpy.types.Scene.prop_plasticity_pin_uv_reload_textures
     del bpy.types.Scene.prop_plasticity_pin_uv_assign_checker
-    del bpy.types.Scene.prop_plasticity_pin_uv_remove_checker
     del bpy.types.Scene.prop_plasticity_pin_mesh_select_similar
     del bpy.types.Scene.prop_plasticity_pin_mesh_object_transform_control_mode
     del bpy.types.Scene.prop_plasticity_pin_mesh_join

@@ -4,6 +4,21 @@
 
 # plasticity-blender-addon-gamedev 中文版
 
+## 最新版本：1.4.1
+
+- 修复 Alt+单击可能选中目标缝合区域之外面的问题。
+
+## 1.4 版本更新
+
+- 保留 CAD 面边界缝合边、已合并岛和现有 UV 布局。
+- 新增实时 UV 更新模式：展开、盒投影或关闭，并支持调整投影尺寸。
+- 展开时保留现有缝合边，避免自动重建 CAD 面边界。
+- 实时扩展开启时，Alt+单击选择缝合边围成的区域，Ctrl+Alt+单击取消选择。
+- 改进圆柱与圆角槽壁的自动选择、圆柱缝合边朝向相机控制和球形帽/开口 UV 投影。
+- 新增对齐、基数和最大覆盖率 UV 打包模式。
+- 新增切换检查纹理按钮；断开 Plasticity 时也可使用本地 UV、网格工具。
+- 扩大重新细分容差和角度范围。
+
 <p>
   <a href="https://www.youtube.com/watch?v=Bk0S0jZEzRM">
     <img src="https://img.youtube.com/vi/Bk0S0jZEzRM/hqdefault.jpg" alt="在 YouTube 观看">
