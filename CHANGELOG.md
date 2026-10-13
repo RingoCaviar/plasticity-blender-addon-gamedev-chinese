@@ -12,6 +12,10 @@ These features were developed in this fork first and were later upstreamed, so t
 
 This fork continues beyond upstream and adds additional GameDev-focused workflow changes, targeting real-time asset preparation (game-ready topology/edge control, UV workflow, and export-oriented tooling).
 
+## Version 1.4.1 updates
+
+- Fix for Alt+Click seam region selection
+
 ## Version 1.4.0 updates
 
 - **Preserve UV Seams:** retain CAD-face boundary seams and merged islands when updating meshes through Refresh or Refacet.
