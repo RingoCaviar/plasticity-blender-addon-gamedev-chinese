@@ -2,7 +2,7 @@ bl_info = {
     "name": "Plasticity Blender Addon Gamedev",
     "description": "Game development focused fork of the Plasticity Blender add-on.",
     "author": "Nick Kallen, User129863",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (4, 3, 0),
     "location": "View3D > Sidebar > Plasticity",
     "category": "Object",

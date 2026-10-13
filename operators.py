@@ -447,12 +447,13 @@ class SelectSeamBoundRegionOperator(bpy.types.Operator):
         target = not self.deselect
         for face_index in region:
             bm.faces[face_index].select = target
-        if self.deselect:
-            seed.select = False
-            bm.select_flush(False)
-        else:
-            bm.select_flush(True)
+        # Flush in face mode so shared boundary vertices do not select
+        # neighboring faces across the seam.
+        bm.select_flush_mode()
         bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        # This explicit region selection must not trigger another surface
+        # expansion or automatic seam rewrite on the next timer tick.
+        _prime_live_expand_selection_cache_for_objects(context, [obj])
         self.report({'INFO'}, ("Deselected" if self.deselect else "Selected")
                     + f" {len(region)} faces bound by seams")
         return {'FINISHED'}

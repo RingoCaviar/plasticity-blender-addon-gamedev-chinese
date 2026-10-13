@@ -2,7 +2,7 @@
 
 # Plasticity Blender Addon Gamedev
 
-[![Version](https://img.shields.io/badge/version-1.4.0-2ea44f)](#latest-release-140)
+[![Version](https://img.shields.io/badge/version-1.4.1-2ea44f)](#latest-release-141)
 [![Blender](https://img.shields.io/badge/Blender-4.3%2B-E87D0D?logo=blender&logoColor=white)](CHANGELOG.md#version-12-updates)
 [![License](https://img.shields.io/badge/license-MIT-0969da)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/User129863/plasticity-blender-addon-gamedev?logo=github)](https://github.com/User129863/plasticity-blender-addon-gamedev/stargazers)
@@ -35,21 +35,9 @@ Unofficial fork that regularly incorporates the latest improvements from the off
 
 </div>
 
-## Latest Release: 1.4.0
+## Latest Release: 1.4.1
 
-- **Preserve UV Seams:** retain CAD-face boundary seams and merged islands when updating meshes through Refresh or Refacet.
-- **Preserve UVs:** transfer existing UV layouts when updating meshes from Plasticity, helping textures stay aligned.
-- **Live UV Update modes:** choose **Unwrap**, **Box Project**, or **Off** after seam edits. The add-on now manages live UV updates, so you no longer need to enable Blender's **Live Unwrap** separately. Box Project includes an adjustable projection size.
-- **Preserve Existing Seams when unwrapping:** unwrap using your current seams without automatically rebuilding CAD-face boundaries, keeping manually merged islands together.
-- **Select regions enclosed by seams:** while Live Expand is enabled, **Alt+Click** selects a seam-bound region and **Ctrl+Alt+Click** deselects it.
-- **Improved Auto Select Cylinders:** better detection of cylindrical and rounded-slot walls, with improved exclusion of caps and transition fillets. Cylinder selection is no longer marked experimental.
-- **Seam Toward Camera:** steer automatic cylinder seam placement by rotating your view so the desired side faces you. The add-on favors an edge path on that side, giving you approximate control over the seam's position. Replaces the previous Occluded Only option.
-- **Simplified cylinder seam controls:** removed the separate Cylinder Seam Mode and Partial Wrap Angle settings.
-- **Improved Sphere Cap / Opening workflow:** dedicated UV projection for spherical caps and openings, with adjustable cap size and cap-and-band layouts for deeper shapes.
-- **New UV packing modes:** **Aligned** preserves island orientation, **Cardinal** allows 90° rotations, and **Maximum Coverage** allows free rotation and tighter packing.
-- **Toggle Checker Texture:** a single button applies or removes the checker texture and restores previous material assignments.
-- **Tools available while disconnected:** access UV tools, mesh tools, and other local utilities without an active Plasticity connection.
-- **Expanded Refacet ranges:** minimum tolerance reduced from **0.0001 to 0.000001**, and minimum angle reduced from **0.1 to 0.01**, across controls and presets.
+- Fixed: Alt+Click could select faces outside the region enclosed by UV seams. Seam-region selection now respects existing boundaries and prevents Live Expand from adding neighboring surfaces.
 
 [View older releases](CHANGELOG.md)
 

@@ -12,6 +12,22 @@ These features were developed in this fork first and were later upstreamed, so t
 
 This fork continues beyond upstream and adds additional GameDev-focused workflow changes, targeting real-time asset preparation (game-ready topology/edge control, UV workflow, and export-oriented tooling).
 
+## Version 1.4.0 updates
+
+- **Preserve UV Seams:** retain CAD-face boundary seams and merged islands when updating meshes through Refresh or Refacet.
+- **Preserve UVs:** transfer existing UV layouts when updating meshes from Plasticity, helping textures stay aligned.
+- **Live UV Update modes:** choose **Unwrap**, **Box Project**, or **Off** after seam edits. The add-on now manages live UV updates, so you no longer need to enable Blender's **Live Unwrap** separately. Box Project includes an adjustable projection size.
+- **Preserve Existing Seams when unwrapping:** unwrap using your current seams without automatically rebuilding CAD-face boundaries, keeping manually merged islands together.
+- **Select regions enclosed by seams:** while Live Expand is enabled, **Alt+Click** selects a seam-bound region and **Ctrl+Alt+Click** deselects it.
+- **Improved Auto Select Cylinders:** better detection of cylindrical and rounded-slot walls, with improved exclusion of caps and transition fillets. Cylinder selection is no longer marked experimental.
+- **Seam Toward Camera:** steer automatic cylinder seam placement by rotating your view so the desired side faces you. The add-on favors an edge path on that side, giving you approximate control over the seam's position. Replaces the previous Occluded Only option.
+- **Simplified cylinder seam controls:** removed the separate Cylinder Seam Mode and Partial Wrap Angle settings.
+- **Improved Sphere Cap / Opening workflow:** dedicated UV projection for spherical caps and openings, with adjustable cap size and cap-and-band layouts for deeper shapes.
+- **New UV packing modes:** **Aligned** preserves island orientation, **Cardinal** allows 90° rotations, and **Maximum Coverage** allows free rotation and tighter packing.
+- **Toggle Checker Texture:** a single button applies or removes the checker texture and restores previous material assignments.
+- **Tools available while disconnected:** access UV tools, mesh tools, and other local utilities without an active Plasticity connection.
+- **Expanded Refacet ranges:** minimum tolerance reduced from **0.0001 to 0.000001**, and minimum angle reduced from **0.1 to 0.01**, across controls and presets.
+
 ## Version 1.3.2 updates
 
 - Added: Support for the Blender-to-Plasticity PolySpline workflow. New Send to Plasticity button in the Main tab.
