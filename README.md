@@ -134,4 +134,16 @@ https://github.com/user-attachments/assets/bed96ba8-e440-4f40-ba1c-5b3c95cbf68b
 
 https://github.com/user-attachments/assets/6e29f8ec-b462-414b-9091-e373f7d5f232
 
-https://github.com/user-attachments/assets/e524569c-2892-42ee-a86b-ee753772e68e
+https://github.com/user-attachments/assets/e524569c-2892-42ee-a86b-ee753772e68e`r`n`r`n# Release packaging
+
+Run this from the repository root:
+
+```powershell
+python tools/package_release.py
+```
+
+The generated archive is written to `dist/` and is ready for Blender's **Install...** command. The ZIP contains one top-level directory (`plasticity_blender_addon_gamedev_chinese/`); `__init__.py` is directly inside that directory, as required for a Blender add-on package.
+
+Use `--output` to choose another ZIP path or `--package-name` to change the installed directory name.
+
+
